@@ -1,0 +1,5 @@
+{
+  "name": "uSampler",
+  "description": "A professional-grade browser extension sampler UI with waveform editing, transport controls, and effects processing.",
+  "requestFramePermissions": []
+}
