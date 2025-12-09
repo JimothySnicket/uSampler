@@ -8,6 +8,7 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // Disable code splitting to avoid blob URLs in Chrome extensions
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),
@@ -15,8 +16,13 @@ export default defineConfig({
       output: {
         entryFileNames: 'assets/[name]-[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',
-        assetFileNames: 'assets/[name]-[hash].[ext]'
+        assetFileNames: 'assets/[name]-[hash].[ext]',
+        // Inline all chunks to avoid blob URLs
+        inlineDynamicImports: false,
+        manualChunks: undefined
       }
-    }
+    },
+    // Increase chunk size limit to reduce splitting
+    chunkSizeWarningLimit: 1000
   }
 });

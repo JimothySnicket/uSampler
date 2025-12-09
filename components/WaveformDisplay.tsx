@@ -453,17 +453,88 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
           const duration = sample.buffer.duration;
           let currentPos = 0;
 
-          if (isPlaying && engine.context) {
+          if (isPlaying && engine.context && engine.playbackStartTime > 0) {
+            // Calculate elapsed real time since playback started
             const elapsed = engine.context.currentTime - engine.playbackStartTime;
-            const progress = (elapsed % duration) / duration;
-            currentPos = elapsed % duration;
-            if (elapsed < duration) { // Or loop logic?
-              vizRef.current.drawPlayhead(progress);
+            
+            // Get playback rate (accounts for time-stretching)
+            const playbackRate = engine.currentPlaybackRate || 1.0;
+            
+            // When time-stretching (playbackRate != 1.0), preview plays the full buffer (0, 1)
+            // Otherwise, use the region prop which may be a cropped selection
+            const actualRegionStart = playbackRate !== 1.0 ? 0 : region.start;
+            const actualRegionEnd = playbackRate !== 1.0 ? 1 : region.end;
+            
+            // The region being played (in seconds of the buffer)
+            const regionStartTime = actualRegionStart * duration;
+            const regionEndTime = actualRegionEnd * duration;
+            const regionDuration = regionEndTime - regionStartTime;
+            
+            // Calculate how much buffer time has elapsed
+            // elapsed is real-time seconds, multiply by playbackRate to get buffer-time seconds
+            // When playbackRate < 1.0 (slower), less buffer time elapses per real second
+            // When playbackRate > 1.0 (faster), more buffer time elapses per real second
+            const bufferTimeElapsed = elapsed * playbackRate;
+            
+            // Calculate current position in the buffer
+            // Start from the region start and add the elapsed buffer time
+            const bufferPosition = regionStartTime + bufferTimeElapsed;
+            
+            // Effective playback duration: how long playback takes in real-time
+            // When playbackRate < 1.0 (slower), playback takes longer in real-time
+            // When playbackRate > 1.0 (faster), playback takes less time in real-time
+            const effectivePlaybackDuration = regionDuration / playbackRate;
+            
+            // Keep playhead visible for the full effective playback duration
+            // Add larger tolerance to account for timing precision and ensure playhead
+            // stays visible until playback actually ends
+            const tolerance = 0.5; // Increased tolerance to prevent premature disappearance
+            
+            // When time-stretching, only check elapsed time (buffer position will reach end before playback completes)
+            // When normal playback, check both for safety
+            // For time-stretching, also ensure we haven't exceeded the buffer end significantly
+            const shouldShowPlayhead = playbackRate !== 1.0 
+              ? elapsed <= effectivePlaybackDuration + tolerance && bufferPosition <= regionEndTime + (duration * 0.1) // Allow slight overshoot
+              : elapsed <= effectivePlaybackDuration + tolerance && bufferPosition <= regionEndTime + tolerance;
+
+            if (shouldShowPlayhead) {
+              // Clamp buffer position to valid range (always keep within buffer bounds)
+              // When time-stretching and buffer position exceeds end, keep it at the end
+              currentPos = Math.max(regionStartTime, Math.min(bufferPosition, regionEndTime));
+              
+              // Normalize to 0-1 for full buffer and draw playhead
+              // When at end of buffer during stretch, keep playhead at end (1.0) until playback completes
+              const bufferProgress = Math.max(0, Math.min(currentPos / duration, 1.0));
+              
+              // Always draw playhead when condition passes - draw directly on canvas to ensure visibility
+              // This bypasses the zoom/scroll visibility check in drawPlayhead which might hide it
+              if (vizRef.current && vizRef.current.ctx && vizRef.current.width) {
+                const ctx = vizRef.current.ctx;
+                const w = vizRef.current.width;
+                const h = vizRef.current.height;
+                const zoom = vizRef.current.zoomLevel || 1.0;
+                const scroll = vizRef.current.scrollOffset || 0.0;
+                
+                const visibleStart = scroll;
+                const visibleEnd = scroll + (1 / zoom);
+                
+                // Always draw if within visible range (the shouldShowPlayhead check already validated timing)
+                if (bufferProgress >= visibleStart && bufferProgress <= visibleEnd) {
+                  const x = (bufferProgress - visibleStart) * zoom * w;
+                  ctx.fillStyle = vizRef.current.options.playheadColor || '#ffffff';
+                  ctx.fillRect(x, 0, 2, h);
+                }
+              } else {
+                // Fallback to visualizer method
+                vizRef.current.drawPlayhead(bufferProgress);
+              }
             }
           }
 
           if (timeDisplayRef.current) {
-            timeDisplayRef.current.innerText = `${formatTime(currentPos)} / ${formatTime(duration)}`;
+            const playbackRate = engine?.currentPlaybackRate || 1.0;
+            const effectiveDuration = duration / playbackRate;
+            timeDisplayRef.current.innerText = `${formatTime(currentPos)} / ${formatTime(effectiveDuration)}`;
           }
         } else {
           vizRef.current.clear();

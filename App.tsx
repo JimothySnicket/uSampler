@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAudio } from './src/context/AudioContext';
 import {
     Play, Pause, Square, SkipBack, Scissors,
-    Sliders, Wand2, Lock, MonitorPlay, ChevronDown, RefreshCcw, Crop, Volume2, AudioWaveform, Keyboard, ChevronRight
+    Sliders, Lock, MonitorPlay, ChevronDown, RefreshCcw, Crop, Volume2, AudioWaveform, Keyboard, ChevronRight, Sparkles, Loader2, Gauge, Split
 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { WaveformDisplay } from './components/WaveformDisplay';
@@ -15,13 +15,14 @@ import { AudioState } from './src/core/AudioEngine';
 import JSZip from 'jszip';
 
 // Dev version - increment this number with each update
-const DEV_VERSION = '2.1';
+const DEV_VERSION = '2.3';
 
 export default function App() {
     const { engine, state, startRecording, stopRecording, toggleArm, isArmed, selectSource, setRecordingCallback } = useAudio();
 
     const isRecording = state === AudioState.RECORDING;
     const [isPlaying, setIsPlaying] = useState(false);
+    const [playbackTime, setPlaybackTime] = useState({ current: 0, total: 0 });
     const [activeTab, setActiveTab] = useState<TabView>(TabView.MAIN);
     const [samples, setSamples] = useState<Sample[]>([]);
     const [activeSampleId, setActiveSampleId] = useState<string>('');
@@ -88,6 +89,19 @@ export default function App() {
     // Resizable splitter state (0.4 = 40% waveform, 60% controls)
     const [splitRatio, setSplitRatio] = useState(0.4);
     const [isResizing, setIsResizing] = useState(false);
+
+    // Time stretching state
+    const [timeStretchRatio, setTimeStretchRatio] = useState(1.0);
+    const [timeStretchProgress, setTimeStretchProgress] = useState(0);
+    const [isPreviewingStretch, setIsPreviewingStretch] = useState(false);
+    const [targetTempo, setTargetTempo] = useState<number | null>(null);
+    const [syncToTempo, setSyncToTempo] = useState(false);
+    const [isDetectingBPM, setIsDetectingBPM] = useState(false);
+    const prevStretchRatioRef = useRef<number>(1.0);
+
+    // Stem separation state
+    const [stemModelType, setStemModelType] = useState<'2stems' | '4stems' | '5stems'>('4stems');
+    const [stemSeparationServer, setStemSeparationServer] = useState<string>('');
 
     const activeSample = samples.find(s => s.id === activeSampleId);
 
@@ -176,12 +190,137 @@ export default function App() {
     // Sync playback end and volume, and check source connection status
     useEffect(() => {
         if (engine) {
-            engine.onPlaybackEnded = () => setIsPlaying(false);
+            engine.onPlaybackEnded = () => {
+                setIsPlaying(false);
+                setPlaybackTime({ current: 0, total: 0 });
+            };
             engine.setVolume(isMuted ? 0 : gain / 100);
             // Check if source is connected
             setIsSourceConnected(!!engine.sourceNode);
         }
     }, [engine, gain, isMuted, state]); // Include state to detect when recording starts/stops
+
+    // Update playback time display
+    useEffect(() => {
+        // Always show time display, even when not playing or no sample
+        if (!isPlaying || !engine || !engine.context) {
+            if (activeSample?.buffer) {
+                // Show total duration even when not playing
+                const duration = activeSample.buffer.duration;
+                const playbackRate = engine?.currentPlaybackRate || 1.0;
+                const regionDuration = duration * (region.end - region.start);
+                const effectiveDuration = regionDuration / playbackRate;
+                setPlaybackTime({ current: 0, total: effectiveDuration });
+            } else {
+                setPlaybackTime({ current: 0, total: 0 });
+            }
+            return;
+        }
+
+        if (!activeSample?.buffer) {
+            setPlaybackTime({ current: 0, total: 0 });
+            return;
+        }
+
+        let animationFrameId: number;
+        const updateTime = () => {
+            if (!engine.context || !activeSample?.buffer) {
+                setPlaybackTime({ current: 0, total: 0 });
+                return;
+            }
+
+            const duration = activeSample.buffer.duration;
+            const playbackRate = engine.currentPlaybackRate || 1.0;
+            
+            // Calculate region duration (what's actually being played)
+            const regionDuration = duration * (region.end - region.start);
+            const effectiveDuration = regionDuration / playbackRate;
+
+            if (engine.playbackStartTime > 0) {
+                const elapsed = engine.context.currentTime - engine.playbackStartTime;
+                // playbackStartTime includes the regionStartTime offset, so subtract it to get actual playback time
+                const regionStartTime = duration * region.start;
+                const actualPlaybackTime = elapsed - regionStartTime;
+                // Current position relative to the region being played (1 second per second)
+                const currentPos = Math.max(0, Math.min(actualPlaybackTime, regionDuration));
+                setPlaybackTime({ current: currentPos, total: effectiveDuration });
+            } else {
+                setPlaybackTime({ current: 0, total: effectiveDuration });
+            }
+
+            if (isPlaying) {
+                animationFrameId = requestAnimationFrame(updateTime);
+            }
+        };
+
+        updateTime();
+        return () => {
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+        };
+    }, [isPlaying, engine, activeSample, region]);
+
+    // Live time stretching: restart playback when ratio changes during preview
+    useEffect(() => {
+        // Skip on initial mount or if not previewing
+        if (!isPreviewingStretch || !isPlaying || !activeSample?.buffer || !engine || !engine.context) {
+            prevStretchRatioRef.current = timeStretchRatio;
+            return;
+        }
+        
+        // Only restart if ratio actually changed
+        if (prevStretchRatioRef.current === timeStretchRatio) {
+            return;
+        }
+        
+        // Calculate current playback position
+        const elapsed = engine.context.currentTime - engine.playbackStartTime;
+        const playbackRate = engine.currentPlaybackRate || 1.0;
+        const bufferTimeElapsed = elapsed * playbackRate;
+        const currentPosition = Math.max(0, Math.min(bufferTimeElapsed / activeSample.buffer.duration, 1.0));
+        
+        // Restart playback from current position with new ratio
+        const newPlaybackRate = 1 / timeStretchRatio;
+        const originalOnPlaybackEnded = engine.onPlaybackEnded;
+        engine.onPlaybackEnded = null;
+        
+        // Calculate start/end positions based on current position
+        const startPos = currentPosition;
+        const endPos = 1.0;
+        
+        engine.play(activeSample.buffer, startPos, endPos, false, newPlaybackRate);
+        
+        // Calculate new stretched duration for remaining portion
+        const remainingBufferDuration = activeSample.buffer.duration * (endPos - startPos);
+        const remainingStretchedDuration = remainingBufferDuration / newPlaybackRate;
+        
+        // Update timeout for remaining duration
+        setTimeout(() => {
+            setIsPreviewingStretch(false);
+            setIsPlaying(false);
+            if (engine.onPlaybackEnded === null) {
+                engine.onPlaybackEnded = originalOnPlaybackEnded;
+            }
+        }, remainingStretchedDuration * 1000);
+        
+        // Update ref to track current ratio
+        prevStretchRatioRef.current = timeStretchRatio;
+    }, [timeStretchRatio, isPreviewingStretch, isPlaying, activeSample, engine]);
+
+    // Sync stretch ratio to tempo when target tempo changes
+    useEffect(() => {
+        if (!syncToTempo || !targetTempo || !activeSample) return;
+        
+        const sampleBPM = typeof activeSample.bpm === 'number' ? activeSample.bpm : 
+                         activeSample.detectedBPM || null;
+        
+        if (sampleBPM && sampleBPM > 0 && targetTempo > 0) {
+            // stretchRatio = sampleBPM / targetBPM
+            // Higher target tempo = faster playback = lower stretchRatio
+            // Lower target tempo = slower playback = higher stretchRatio
+            const calculatedRatio = sampleBPM / targetTempo;
+            setTimeStretchRatio(Math.max(0.25, Math.min(4.0, calculatedRatio)));
+        }
+    }, [targetTempo, syncToTempo, activeSample]);
 
     // Update threshold
     useEffect(() => {
@@ -264,6 +403,44 @@ export default function App() {
 
     const handleRenameSample = (id: string, newName: string) => {
         setSamples(samples.map(s => s.id === id ? { ...s, name: newName } : s));
+    };
+
+    const handleAnalyzeSample = async (id: string) => {
+        const sample = samples.find(s => s.id === id);
+        if (!sample || !sample.buffer || !engine) return;
+
+        // Set analyzing state
+        setSamples(samples.map(s => s.id === id ? { ...s, isAnalyzing: true } : s));
+
+        try {
+            const results = await engine.analyzeAudio(sample.buffer);
+
+            // Update sample with results
+            setSamples(samples.map(s => {
+                if (s.id === id) {
+                    const updated: Sample = { ...s, isAnalyzing: false };
+                    if (results.bpm) {
+                        updated.detectedBPM = results.bpm.bpm;
+                        // Also update the display bpm if it's empty or 0
+                        if (!updated.bpm || updated.bpm === 0) {
+                            updated.bpm = results.bpm.bpm;
+                        }
+                    }
+                    if (results.key) {
+                        updated.detectedKey = {
+                            key: results.key.key,
+                            mode: results.key.mode as 'major' | 'minor',
+                            confidence: results.key.confidence
+                        };
+                    }
+                    return updated;
+                }
+                return s;
+            }));
+        } catch (error) {
+            console.error('Analysis error:', error);
+            setSamples(samples.map(s => s.id === id ? { ...s, isAnalyzing: false } : s));
+        }
     };
 
     const downloadBlob = (blob: Blob, filename: string) => {
@@ -1084,6 +1261,13 @@ export default function App() {
                         </button>
                     </div>
 
+                    {/* TIME READOUT */}
+                    <div className="flex items-center gap-2 shrink-0 px-4">
+                        <div className="text-xs font-mono text-zinc-400">
+                            {formatDuration(playbackTime.current)} / {formatDuration(playbackTime.total)}
+                        </div>
+                    </div>
+
                     {/* RIGHT: Status Indicator */}
                     <div className="flex justify-end text-xs text-zinc-600 font-mono shrink-0 min-w-[120px]">
                         {isRecording ? (
@@ -1277,26 +1461,33 @@ export default function App() {
                                 <Sliders className="w-3 h-3" /> EQ & FX
                             </button>
                             <button
-                                onClick={() => setActiveTab(TabView.AI)}
-                                className={`px-6 py-3 text-xs font-bold tracking-wide transition-colors flex items-center gap-2 ${activeTab === TabView.AI ? 'text-indigo-400 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+                                onClick={() => setActiveTab(TabView.TIME_STRETCH)}
+                                className={`px-6 py-3 text-xs font-bold tracking-wide transition-colors border-r border-zinc-800 flex items-center gap-2 ${activeTab === TabView.TIME_STRETCH ? 'text-indigo-400 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
                                     }`}
                             >
-                                <Wand2 className="w-3 h-3" /> AI
+                                <Gauge className="w-3 h-3" /> TIME STRETCH
+                            </button>
+                            <button
+                                onClick={() => setActiveTab(TabView.STEM_SEPARATION)}
+                                className={`px-6 py-3 text-xs font-bold tracking-wide transition-colors flex items-center gap-2 ${activeTab === TabView.STEM_SEPARATION ? 'text-indigo-400 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+                                    }`}
+                            >
+                                <Split className="w-3 h-3" /> STEM SEPARATION
                             </button>
                         </div>
 
-                        <div className="flex-1 relative p-4 bg-zinc-900 overflow-hidden min-h-0">
+                        <div className="flex-1 relative p-4 bg-zinc-900 overflow-auto min-h-0">
                             {activeTab === TabView.MAIN && activeSample && (
-                                <div className="grid grid-cols-2 gap-8">
-                                    <div>
-                                        <h4 className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-3">Sample Metadata</h4>
-                                        <div className="space-y-3">
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 max-w-full">
+                                    <div className="min-w-0">
+                                        <h4 className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-3 sticky top-0 bg-zinc-900 pb-2 z-10">Sample Metadata</h4>
+                                        <div className="space-y-2">
                                             {activeSample.buffer && (
                                                 <>
-                                                    <div className="flex justify-between items-center text-sm border-b border-zinc-800 pb-2">
-                                                        <span className="text-zinc-500">Sample Rate</span>
-                                                        <div className="flex items-center gap-2">
-                                                            <span className="text-zinc-200 font-mono">
+                                                    <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
+                                                        <span className="text-zinc-500 shrink-0">Sample Rate</span>
+                                                        <div className="flex items-center gap-2 min-w-0">
+                                                            <span className="text-zinc-200 font-mono text-xs truncate">
                                                                 {activeSample.buffer.sampleRate % 1000 === 0
                                                                     ? `${(activeSample.buffer.sampleRate / 1000).toFixed(0)}.0 kHz`
                                                                     : `${(activeSample.buffer.sampleRate / 1000).toFixed(1)} kHz`}
@@ -1304,7 +1495,7 @@ export default function App() {
                                                             <select
                                                                 value={exportSampleRate || activeSample.buffer.sampleRate}
                                                                 onChange={(e) => setExportSampleRate(Number(e.target.value))}
-                                                                className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[10px] font-bold tracking-wide uppercase border border-zinc-700 hover:border-zinc-600 transition-all"
+                                                                className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[10px] font-bold tracking-wide uppercase border border-zinc-700 hover:border-zinc-600 transition-all shrink-0"
                                                                 title="Select export sample rate"
                                                             >
                                                                 <option value={activeSample.buffer.sampleRate}>Original ({activeSample.buffer.sampleRate % 1000 === 0 ? `${(activeSample.buffer.sampleRate / 1000).toFixed(0)}.0` : `${(activeSample.buffer.sampleRate / 1000).toFixed(1)}`} kHz)</option>
@@ -1315,47 +1506,87 @@ export default function App() {
                                                             </select>
                                                         </div>
                                                     </div>
-                                                    <div className="flex justify-between items-center text-sm border-b border-zinc-800 pb-2">
-                                                        <span className="text-zinc-500">Bit Depth</span>
-                                                        <span className="text-zinc-200 font-mono">32-bit (Float)</span>
+                                                    <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
+                                                        <span className="text-zinc-500 shrink-0">Bit Depth</span>
+                                                        <span className="text-zinc-200 font-mono text-xs">32-bit (Float)</span>
                                                     </div>
-                                                    <div className="flex justify-between items-center text-sm border-b border-zinc-800 pb-2">
-                                                        <span className="text-zinc-500">Channels</span>
-                                                        <span className="text-zinc-200 font-mono">
+                                                    <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
+                                                        <span className="text-zinc-500 shrink-0">Channels</span>
+                                                        <span className="text-zinc-200 font-mono text-xs">
                                                             {activeSample.buffer.numberOfChannels === 1 ? 'Mono' :
                                                                 activeSample.buffer.numberOfChannels === 2 ? 'Stereo' :
                                                                     `${activeSample.buffer.numberOfChannels} Channels`}
                                                         </span>
                                                     </div>
-                                                    <div className="flex justify-between items-center text-sm border-b border-zinc-800 pb-2">
-                                                        <span className="text-zinc-500">Format</span>
-                                                        <span className="text-zinc-200 font-mono">
+                                                    <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
+                                                        <span className="text-zinc-500 shrink-0">Format</span>
+                                                        <span className="text-zinc-200 font-mono text-xs">
                                                             {activeSample.blob?.type === 'audio/webm' ? 'WebM' :
                                                                 activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1]?.toUpperCase() || 'WAV'}
                                                         </span>
                                                     </div>
                                                 </>
                                             )}
-                                            <div className="flex justify-between items-center text-sm border-b border-zinc-800 pb-2">
-                                                <span className="text-zinc-500">Duration</span>
-                                                <span className="text-zinc-200 font-mono">{activeSample.duration}</span>
+                                            <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
+                                                <span className="text-zinc-500 shrink-0">Duration</span>
+                                                <span className="text-zinc-200 font-mono text-xs">{activeSample.duration}</span>
                                             </div>
-                                            <div className="flex justify-between items-center text-sm border-b border-zinc-800 pb-2">
-                                                <span className="text-zinc-500">Size</span>
-                                                <span className="text-zinc-200 font-mono">{activeSample.size}</span>
+                                            <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
+                                                <span className="text-zinc-500 shrink-0">Size</span>
+                                                <span className="text-zinc-200 font-mono text-xs">{activeSample.size}</span>
                                             </div>
-                                            <div className="flex justify-between items-center text-sm border-b border-zinc-800 pb-2">
-                                                <span className="text-zinc-500">BPM</span>
-                                                <span className="text-zinc-200 font-mono">{activeSample.bpm || '—'}</span>
+                                            <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
+                                                <span className="text-zinc-500 shrink-0">BPM</span>
+                                                <div className="flex items-center gap-2 min-w-0">
+                                                    <span className="text-zinc-200 font-mono text-xs">
+                                                        {activeSample.detectedBPM || activeSample.bpm || '—'}
+                                                    </span>
+                                                    {activeSample.detectedBPM && activeSample.bpm && activeSample.detectedBPM !== activeSample.bpm && (
+                                                        <span className="text-zinc-500 text-[10px] shrink-0">(detected: {activeSample.detectedBPM})</span>
+                                                    )}
+                                                </div>
                                             </div>
-                                            <div className="flex justify-between items-center text-sm border-b border-zinc-800 pb-2">
-                                                <span className="text-zinc-500">Key</span>
-                                                <span className="text-zinc-200 font-mono">—</span>
+                                            <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
+                                                <span className="text-zinc-500 shrink-0">Key</span>
+                                                <div className="flex items-center gap-2 min-w-0">
+                                                    <span className="text-zinc-200 font-mono text-xs truncate">
+                                                        {activeSample.detectedKey 
+                                                            ? `${activeSample.detectedKey.key} ${activeSample.detectedKey.mode === 'major' ? 'Major' : 'Minor'}${activeSample.detectedKey.confidence < 0.5 ? '?' : ''}`
+                                                            : '—'
+                                                        }
+                                                    </span>
+                                                    {activeSample.detectedKey && (
+                                                        <span className="text-zinc-500 text-[10px] shrink-0">
+                                                            ({Math.round(activeSample.detectedKey.confidence * 100)}%)
+                                                        </span>
+                                                    )}
+                                                </div>
                                             </div>
+                                            {activeSample.buffer && (
+                                                <div className="pt-3 border-t border-zinc-800">
+                                                    <button
+                                                        onClick={() => handleAnalyzeSample(activeSample.id)}
+                                                        disabled={activeSample.isAnalyzing}
+                                                        className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white text-xs font-bold rounded border border-indigo-500 transition-colors"
+                                                    >
+                                                        {activeSample.isAnalyzing ? (
+                                                            <>
+                                                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                                Analyzing...
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <Sparkles className="w-3.5 h-3.5" />
+                                                                Analyze Audio
+                                                            </>
+                                                        )}
+                                                    </button>
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
-                                    <div>
-                                        <h4 className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-3">Tags</h4>
+                                    <div className="min-w-0">
+                                        <h4 className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-3 sticky top-0 bg-zinc-900 pb-2 z-10">Tags</h4>
                                         <div className="flex flex-wrap gap-2">
                                             {activeSample.tags.map(tag => (
                                                 <span key={tag} className="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs rounded-full border border-zinc-700 transition-colors cursor-pointer">{tag}</span>
@@ -2030,19 +2261,543 @@ export default function App() {
                                 </div>
                             )}
 
-                            {activeTab === TabView.AI && (
+                            {activeTab === TabView.TIME_STRETCH && activeSample && (
+                                <div className="flex flex-col h-full overflow-auto p-4 gap-6">
+                                    <div>
+                                        <h4 className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-3">Time Stretching</h4>
+                                        <div className="space-y-4">
+                                            {/* Sample Tempo */}
+                                            <div className="flex flex-col gap-2">
+                                                <label className="text-xs text-zinc-400">Sample Tempo</label>
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="number"
+                                                        min="1"
+                                                        max="300"
+                                                        step="1"
+                                                        value={typeof activeSample.bpm === 'number' ? activeSample.bpm : (activeSample.detectedBPM || '')}
+                                                        onChange={(e) => {
+                                                            const newBPM = parseFloat(e.target.value);
+                                                            if (!isNaN(newBPM) && newBPM > 0) {
+                                                                setSamples(prevSamples =>
+                                                                    prevSamples.map(s =>
+                                                                        s.id === activeSample.id ? { ...s, bpm: newBPM } : s
+                                                                    )
+                                                                );
+                                                            }
+                                                        }}
+                                                        className="flex-1 px-3 py-1.5 bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 focus:outline-none focus:border-indigo-500"
+                                                        placeholder="BPM"
+                                                    />
+                                                    <span className="text-xs text-zinc-500">BPM</span>
+                                                    <button
+                                                        onClick={async () => {
+                                                            if (!activeSample?.buffer || !engine || isDetectingBPM) return;
+                                                            setIsDetectingBPM(true);
+                                                            try {
+                                                                const bpmResult = await engine.detectBPM(activeSample.buffer);
+                                                                if (bpmResult && bpmResult.bpm) {
+                                                                    setSamples(prevSamples =>
+                                                                        prevSamples.map(s =>
+                                                                            s.id === activeSample.id 
+                                                                                ? { ...s, detectedBPM: bpmResult.bpm, bpm: bpmResult.bpm }
+                                                                                : s
+                                                                        )
+                                                                    );
+                                                                }
+                                                            } catch (error) {
+                                                                console.error('BPM detection failed:', error);
+                                                            } finally {
+                                                                setIsDetectingBPM(false);
+                                                            }
+                                                        }}
+                                                        disabled={isDetectingBPM || !activeSample?.buffer}
+                                                        className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 disabled:cursor-not-allowed text-xs text-zinc-300 rounded border border-zinc-600 transition-colors"
+                                                    >
+                                                        {isDetectingBPM ? 'Detecting...' : 'Detect'}
+                                                    </button>
+                                                </div>
+                                                {activeSample.detectedBPM && typeof activeSample.bpm === 'number' && activeSample.detectedBPM !== activeSample.bpm && (
+                                                    <span className="text-[10px] text-zinc-500">
+                                                        Detected: {activeSample.detectedBPM} BPM
+                                                    </span>
+                                                )}
+                                            </div>
+
+                                            {/* Target Tempo */}
+                                            <div className="flex flex-col gap-2">
+                                                <div className="flex items-center justify-between">
+                                                    <label className="text-xs text-zinc-400">Target Tempo</label>
+                                                    <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={syncToTempo}
+                                                            onChange={(e) => setSyncToTempo(e.target.checked)}
+                                                            className="w-3 h-3 accent-indigo-500"
+                                                        />
+                                                        Sync to Tempo
+                                                    </label>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="number"
+                                                        min="1"
+                                                        max="300"
+                                                        step="1"
+                                                        value={targetTempo || ''}
+                                                        onChange={(e) => {
+                                                            const value = e.target.value;
+                                                            setTargetTempo(value === '' ? null : parseFloat(value));
+                                                        }}
+                                                        disabled={!activeSample || (!activeSample.bpm && !activeSample.detectedBPM)}
+                                                        className="flex-1 px-3 py-1.5 bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                        placeholder="BPM"
+                                                    />
+                                                    <span className="text-xs text-zinc-500">BPM</span>
+                                                </div>
+                                                {syncToTempo && targetTempo && activeSample && (activeSample.bpm || activeSample.detectedBPM) && (
+                                                    <span className="text-[10px] text-zinc-500">
+                                                        Stretch: {(((typeof activeSample.bpm === 'number' ? activeSample.bpm : activeSample.detectedBPM || 1) / targetTempo)).toFixed(2)}x
+                                                    </span>
+                                                )}
+                                                {(!activeSample?.bpm && !activeSample?.detectedBPM) && (
+                                                    <span className="text-[10px] text-zinc-400">
+                                                        Set sample tempo first
+                                                    </span>
+                                                )}
+                                            </div>
+
+                                            <div className="flex flex-col gap-2">
+                                                <div className="flex items-center justify-between">
+                                                    <label className="text-xs text-zinc-400">Stretch Ratio</label>
+                                                    {syncToTempo && (
+                                                        <span className="text-[10px] text-zinc-500">(Synced to tempo)</span>
+                                                    )}
+                                                </div>
+                                                <div className="flex items-center gap-3">
+                                                    <input
+                                                        type="range"
+                                                        min="0.25"
+                                                        max="4.0"
+                                                        step="0.01"
+                                                        value={timeStretchRatio}
+                                                        onChange={(e) => {
+                                                            if (!syncToTempo) {
+                                                                setTimeStretchRatio(parseFloat(e.target.value));
+                                                            }
+                                                        }}
+                                                        disabled={syncToTempo}
+                                                        className="flex-1 h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    />
+                                                    <span className="text-xs text-zinc-300 font-mono w-16 text-right">
+                                                        {timeStretchRatio.toFixed(2)}x
+                                                    </span>
+                                                </div>
+                                                <div className="flex gap-2 text-[10px] text-zinc-500">
+                                                    <button
+                                                        onClick={() => {
+                                                            if (!syncToTempo) setTimeStretchRatio(0.5);
+                                                        }}
+                                                        disabled={syncToTempo}
+                                                        className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        0.5x
+                                                    </button>
+                                                    <button
+                                                        onClick={() => {
+                                                            if (!syncToTempo) setTimeStretchRatio(0.75);
+                                                        }}
+                                                        disabled={syncToTempo}
+                                                        className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        0.75x
+                                                    </button>
+                                                    <button
+                                                        onClick={() => {
+                                                            if (!syncToTempo) setTimeStretchRatio(1.0);
+                                                        }}
+                                                        disabled={syncToTempo}
+                                                        className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        1.0x
+                                                    </button>
+                                                    <button
+                                                        onClick={() => {
+                                                            if (!syncToTempo) setTimeStretchRatio(1.25);
+                                                        }}
+                                                        disabled={syncToTempo}
+                                                        className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        1.25x
+                                                    </button>
+                                                    <button
+                                                        onClick={() => {
+                                                            if (!syncToTempo) setTimeStretchRatio(1.5);
+                                                        }}
+                                                        disabled={syncToTempo}
+                                                        className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        1.5x
+                                                    </button>
+                                                    <button
+                                                        onClick={() => {
+                                                            if (!syncToTempo) setTimeStretchRatio(2.0);
+                                                        }}
+                                                        disabled={syncToTempo}
+                                                        className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        2.0x
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            {activeSample.isTimeStretching && timeStretchProgress > 0 && (
+                                                <div className="flex flex-col gap-1">
+                                                    <div className="flex items-center justify-between text-[10px] text-zinc-400">
+                                                        <span>Processing...</span>
+                                                        <span>{Math.round(timeStretchProgress * 100)}%</span>
+                                                    </div>
+                                                    <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                                                        <div 
+                                                            className="h-full bg-indigo-500 transition-all duration-300"
+                                                            style={{ width: `${timeStretchProgress * 100}%` }}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            )}
+                                            <div className="flex gap-2">
+                                            <button
+                                                onClick={async () => {
+                                                    if (!activeSample?.buffer || !engine) return;
+                                                    
+                                                    // Real-time preview using playbackRate
+                                                    if (isPreviewingStretch) {
+                                                        // Stop preview early (user clicked stop)
+                                                        engine.stop();
+                                                        setIsPreviewingStretch(false);
+                                                        setIsPlaying(false);
+                                                        // onPlaybackEnded will be restored by useEffect when engine state changes
+                                                    } else {
+                                                        // Start preview
+                                                        setIsPreviewingStretch(true);
+                                                        const playbackRate = 1 / timeStretchRatio; // Inverse for time stretching
+                                                        
+                                                        // Temporarily disable onPlaybackEnded callback to prevent premature stop.
+                                                        // The source.onended event fires when the buffer finishes playing, which happens
+                                                        // at the original buffer duration, not the stretched duration. During
+                                                        // time-stretched preview, we use setTimeout instead to stop at the correct time.
+                                                        const originalOnPlaybackEnded = engine.onPlaybackEnded;
+                                                        engine.onPlaybackEnded = null;
+                                                        
+                                                        engine.play(activeSample.buffer, 0, 1, false, playbackRate);
+                                                        setIsPlaying(true);
+                                                        
+                                                        // Calculate stretched duration (real-time duration)
+                                                        const bufferDuration = activeSample.buffer.duration;
+                                                        const stretchedDuration = bufferDuration / playbackRate;
+                                                        
+                                                        // Stop preview when audio actually ends (use stretched duration)
+                                                        setTimeout(() => {
+                                                            setIsPreviewingStretch(false);
+                                                            setIsPlaying(false);
+                                                            // Restore original callback (useEffect will also restore it, but this ensures it)
+                                                            if (engine.onPlaybackEnded === null) {
+                                                                engine.onPlaybackEnded = originalOnPlaybackEnded;
+                                                            }
+                                                        }, stretchedDuration * 1000);
+                                                    }
+                                                }}
+                                                disabled={activeSample.isTimeStretching || !activeSample.buffer}
+                                                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 disabled:cursor-not-allowed text-white text-xs font-bold rounded border border-zinc-600 transition-colors"
+                                            >
+                                                <MonitorPlay className="w-4 h-4" />
+                                                Preview
+                                            </button>
+                                            <button
+                                                onClick={async () => {
+                                                    if (!activeSample?.buffer || !engine) {
+                                                        console.error('Cannot time stretch: missing buffer or engine');
+                                                        alert('Cannot time stretch: Please select a sample with audio data');
+                                                        return;
+                                                    }
+                                                    
+                                                    // Capture all needed data before async operations
+                                                    const currentSampleId = activeSample.id;
+                                                    const currentBuffer = activeSample.buffer;
+                                                    const currentName = activeSample.name;
+                                                    const currentBpm = activeSample.bpm;
+                                                    const currentTags = [...activeSample.tags];
+                                                    
+                                                    console.log('Starting time stretch...', { 
+                                                        sampleId: currentSampleId,
+                                                        ratio: timeStretchRatio,
+                                                        bufferLength: currentBuffer.length,
+                                                        sampleRate: currentBuffer.sampleRate
+                                                    });
+                                                    
+                                                    setTimeStretchProgress(0);
+                                                    setSamples(prevSamples => 
+                                                        prevSamples.map(s => 
+                                                            s.id === currentSampleId ? { ...s, isTimeStretching: true } : s
+                                                        )
+                                                    );
+                                                    
+                                                    try {
+                                                        // Detect BPM before stretching
+                                                        let originalBPM: number | null = null;
+                                                        try {
+                                                            const bpmResult = await engine.detectBPM(currentBuffer);
+                                                            if (bpmResult && bpmResult.bpm) {
+                                                                originalBPM = bpmResult.bpm;
+                                                                console.log('Detected BPM before stretching:', originalBPM);
+                                                            }
+                                                        } catch (bpmError) {
+                                                            console.warn('BPM detection failed, continuing without BPM update:', bpmError);
+                                                        }
+                                                        
+                                                        // Calculate new BPM based on stretch ratio
+                                                        const newBPM = originalBPM ? originalBPM * timeStretchRatio : currentBpm;
+                                                        
+                                                        const stretched = await engine.timeStretch(
+                                                            currentBuffer,
+                                                            timeStretchRatio,
+                                                            (progress) => {
+                                                                setTimeStretchProgress(progress);
+                                                            }
+                                                        );
+                                                        
+                                                        if (!stretched || !stretched.length) {
+                                                            throw new Error('Time stretch returned invalid buffer');
+                                                        }
+                                                        
+                                                        console.log('Time stretch completed successfully', {
+                                                            originalLength: currentBuffer.length,
+                                                            stretchedLength: stretched.length,
+                                                            originalDuration: currentBuffer.duration,
+                                                            stretchedDuration: stretched.duration,
+                                                            originalBPM,
+                                                            newBPM
+                                                        });
+                                                        
+                                                        const blob = audioBufferToWav(stretched);
+                                                        const originalName = currentName.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+                                                        const extension = currentName.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
+                                                        const newName = `${originalName}_Stretched_${timeStretchRatio.toFixed(2)}x.${extension}`;
+                                                        
+                                                        const newSample: Sample = {
+                                                            id: Date.now().toString(),
+                                                            name: newName,
+                                                            duration: formatDuration(stretched.duration),
+                                                            bpm: typeof newBPM === 'number' ? Math.round(newBPM) : newBPM,
+                                                            size: `${(blob.size / 1024 / 1024).toFixed(2)} MB`,
+                                                            waveform: [],
+                                                            tags: [...currentTags, 'Time Stretched'],
+                                                            buffer: stretched,
+                                                            blob: blob,
+                                                            trimStart: 0,
+                                                            trimEnd: 1,
+                                                            detectedBPM: typeof newBPM === 'number' ? newBPM : undefined
+                                                        };
+                                                        
+                                                        // Use functional updates to ensure we have the latest state
+                                                        setSamples(prevSamples => {
+                                                            // First, clear the isTimeStretching flag from the original sample
+                                                            const updatedSamples = prevSamples.map(s => 
+                                                                s.id === currentSampleId ? { ...s, isTimeStretching: false } : s
+                                                            );
+                                                            // Then add the new sample at the beginning
+                                                            return [newSample, ...updatedSamples];
+                                                        });
+                                                        
+                                                        // Set the new sample as active
+                                                        console.log('Setting new sample as active:', newSample.id, newSample.name);
+                                                        setActiveSampleId(newSample.id);
+                                                    } catch (error) {
+                                                        console.error('Time stretch error:', error);
+                                                        const errorMessage = error instanceof Error ? error.message : String(error);
+                                                        console.error('Error details:', { error, errorMessage, stack: error instanceof Error ? error.stack : undefined });
+                                                        alert(`Time stretch failed: ${errorMessage}\n\nCheck the console for more details.`);
+                                                        
+                                                        // Clear the isTimeStretching flag on error and preserve active sample
+                                                        setSamples(prevSamples => 
+                                                            prevSamples.map(s => 
+                                                                s.id === currentSampleId ? { ...s, isTimeStretching: false } : s
+                                                            )
+                                                        );
+                                                        // Make sure we don't deselect the sample on error
+                                                        setActiveSampleId(currentSampleId);
+                                                    } finally {
+                                                        setTimeStretchProgress(0);
+                                                    }
+                                                }}
+                                                disabled={activeSample.isTimeStretching || !activeSample.buffer}
+                                                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white text-xs font-bold rounded border border-indigo-500 transition-colors"
+                                            >
+                                                {activeSample.isTimeStretching ? (
+                                                    <>
+                                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                                        Stretching...
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <Gauge className="w-4 h-4" />
+                                                        Apply Time Stretch
+                                                    </>
+                                                )}
+                                            </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {activeTab === TabView.STEM_SEPARATION && activeSample && (
+                                <div className="flex flex-col h-full overflow-auto p-4 gap-6">
+                                    <div>
+                                        <h4 className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-3">Stem Separation</h4>
+                                        <div className="space-y-4">
+                                            <div className="flex flex-col gap-2">
+                                                <label className="text-xs text-zinc-400">Model Type</label>
+                                                <select
+                                                    value={stemModelType}
+                                                    onChange={(e) => setStemModelType(e.target.value as '2stems' | '4stems' | '5stems')}
+                                                    className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs font-bold border border-zinc-700"
+                                                >
+                                                    <option value="2stems">2 Stems (Vocals/Accompaniment)</option>
+                                                    <option value="4stems">4 Stems (Vocals/Drums/Bass/Other)</option>
+                                                    <option value="5stems">5 Stems (Vocals/Drums/Bass/Piano/Other)</option>
+                                                </select>
+                                            </div>
+                                            <div className="flex flex-col gap-2">
+                                                <label className="text-xs text-zinc-400">Server Endpoint (Optional)</label>
+                                                <input
+                                                    type="text"
+                                                    value={stemSeparationServer}
+                                                    onChange={(e) => setStemSeparationServer(e.target.value)}
+                                                    placeholder="https://api.example.com/separate"
+                                                    className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs border border-zinc-700 placeholder-zinc-600"
+                                                />
+                                                <p className="text-[10px] text-zinc-500">
+                                                    Leave empty for browser-based separation (requires TensorFlow.js)
+                                                </p>
+                                            </div>
+                                            <button
+                                                onClick={async () => {
+                                                    if (!activeSample?.buffer || !engine) return;
+                                                    
+                                                    setSamples(samples.map(s => 
+                                                        s.id === activeSample.id ? { ...s, isSeparatingStems: true } : s
+                                                    ));
+                                                    
+                                                    try {
+                                                        const result = stemSeparationServer
+                                                            ? await engine.separateStemsServer(activeSample.buffer, stemSeparationServer, { modelType: stemModelType })
+                                                            : await engine.separateStems(activeSample.buffer, { modelType: stemModelType });
+                                                        
+                                                        if (result) {
+                                                            setSamples(samples.map(s => {
+                                                                if (s.id === activeSample.id) {
+                                                                    return { ...s, stems: result, isSeparatingStems: false };
+                                                                }
+                                                                return s;
+                                                            }));
+                                                            
+                                                            // Create new samples for each stem
+                                                            const stemNames = {
+                                                                vocals: 'Vocals',
+                                                                drums: 'Drums',
+                                                                bass: 'Bass',
+                                                                other: 'Other',
+                                                                accompaniment: 'Accompaniment'
+                                                            };
+                                                            
+                                                            const newSamples: Sample[] = [];
+                                                            for (const [stemKey, stemBuffer] of Object.entries(result)) {
+                                                                if (stemBuffer) {
+                                                                    const blob = audioBufferToWav(stemBuffer);
+                                                                    const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+                                                                    const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
+                                                                    const stemName = stemNames[stemKey as keyof typeof stemNames] || stemKey;
+                                                                    const newName = `${originalName}_${stemName}.${extension}`;
+                                                                    
+                                                                    newSamples.push({
+                                                                        id: `${Date.now()}-${stemKey}`,
+                                                                        name: newName,
+                                                                        duration: formatDuration(stemBuffer.duration),
+                                                                        bpm: activeSample.bpm,
+                                                                        size: `${(blob.size / 1024 / 1024).toFixed(2)} MB`,
+                                                                        waveform: [],
+                                                                        tags: [...activeSample.tags, 'Stem', stemName],
+                                                                        buffer: stemBuffer,
+                                                                        blob: blob,
+                                                                        trimStart: 0,
+                                                                        trimEnd: 1
+                                                                    });
+                                                                }
+                                                            }
+                                                            
+                                                            if (newSamples.length > 0) {
+                                                                setSamples([...newSamples, ...samples]);
+                                                            }
+                                                        } else {
+                                                            console.warn('Stem separation returned no results');
+                                                        }
+                                                    } catch (error) {
+                                                        console.error('Stem separation error:', error);
+                                                    } finally {
+                                                        setSamples(samples.map(s => 
+                                                            s.id === activeSample.id ? { ...s, isSeparatingStems: false } : s
+                                                        ));
+                                                    }
+                                                }}
+                                                disabled={activeSample.isSeparatingStems || !activeSample.buffer}
+                                                className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white text-xs font-bold rounded border border-indigo-500 transition-colors"
+                                            >
+                                                {activeSample.isSeparatingStems ? (
+                                                    <>
+                                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                                        Separating...
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <Split className="w-4 h-4" />
+                                                        Separate Stems
+                                                    </>
+                                                )}
+                                            </button>
+                                            <div className="text-[10px] text-zinc-500 bg-zinc-800/50 p-3 rounded border border-zinc-800">
+                                                <p className="font-semibold mb-1">Note:</p>
+                                                <p>Browser-based separation requires TensorFlow.js and model files (50-200MB).</p>
+                                                <p className="mt-2">For best results, use server-side separation with Spleeter or Demucs.</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {activeTab === TabView.TIME_STRETCH && !activeSample && (
                                 <div className="absolute inset-0 flex items-center justify-center">
                                     <div className="text-center">
                                         <div className="w-16 h-16 bg-zinc-800/50 rounded-full flex items-center justify-center mx-auto mb-4 border border-zinc-700">
-                                            <Lock className="w-6 h-6 text-zinc-400" />
+                                            <Gauge className="w-6 h-6 text-zinc-400" />
                                         </div>
-                                        <h3 className="text-lg font-bold text-white mb-2">Feature Locked</h3>
-                                        <p className="text-zinc-500 text-sm mb-6 max-w-xs mx-auto">
-                                            Upgrade to access AI generation features.
+                                        <h3 className="text-lg font-bold text-white mb-2">Time Stretching</h3>
+                                        <p className="text-zinc-500 text-sm max-w-xs mx-auto">
+                                            Select a sample to stretch its duration without changing pitch.
                                         </p>
-                                        <button className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-full transition-colors">
-                                            Unlock Pro
-                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {activeTab === TabView.STEM_SEPARATION && !activeSample && (
+                                <div className="absolute inset-0 flex items-center justify-center">
+                                    <div className="text-center">
+                                        <div className="w-16 h-16 bg-zinc-800/50 rounded-full flex items-center justify-center mx-auto mb-4 border border-zinc-700">
+                                            <Split className="w-6 h-6 text-zinc-400" />
+                                        </div>
+                                        <h3 className="text-lg font-bold text-white mb-2">Stem Separation</h3>
+                                        <p className="text-zinc-500 text-sm max-w-xs mx-auto">
+                                            Select a sample to separate into individual stems (vocals, drums, bass, etc.).
+                                        </p>
                                     </div>
                                 </div>
                             )}

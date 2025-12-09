@@ -21,6 +21,7 @@ export declare class AudioEngine {
     state: string;
     activeSource: AudioBufferSourceNode | null;
     playbackStartTime: number;
+    currentPlaybackRate: number;
     recordedChunks: BlobPart[];
     recordingBuffer: { min: number; max: number }[];
     onRecordingDataAvailable: ((blob: Blob) => void) | null;
@@ -37,7 +38,7 @@ export declare class AudioEngine {
     connectDisplayMedia(): Promise<boolean>;
     startRecording(): void;
     stopRecording(): void;
-    play(buffer: AudioBuffer, trimStart: number, trimEnd: number, loop: boolean): void;
+    play(buffer: AudioBuffer, trimStart: number, trimEnd: number, loop: boolean, playbackRate?: number): void;
     stop(): void;
     playSnippet(buffer: AudioBuffer, startPct: number, durationSec?: number): void;
     getAnalyserData(timeData: Uint8Array): void;
@@ -61,4 +62,11 @@ export declare class AudioEngine {
     setReverb(roomSize: number, damping: number, mix: number): void;
     getSampleRate(): number;
     bufferToBlob(buffer: AudioBuffer): Blob;
+    detectBPM(buffer: AudioBuffer): Promise<{ bpm: number; threshold: number } | null>;
+    detectKey(buffer: AudioBuffer): Promise<{ key: string; mode: 'major' | 'minor'; confidence: number; alternativeKeys?: Array<{ key: string; mode: 'major' | 'minor'; confidence: number }> } | null>;
+    analyzeAudio(buffer: AudioBuffer): Promise<{ key: { key: string; mode: string; confidence: number } | null; bpm: { bpm: number; threshold: number } | null }>;
+    timeStretch(buffer: AudioBuffer, stretchRatio: number, onProgress?: ((progress: number) => void) | null): Promise<AudioBuffer>;
+    timeStretchWithPitch(buffer: AudioBuffer, stretchRatio: number, pitchShiftSemitones: number): Promise<AudioBuffer>;
+    separateStems(buffer: AudioBuffer, options?: { modelType?: '2stems' | '4stems' | '5stems'; quality?: 'low' | 'medium' | 'high'; useServer?: boolean }): Promise<{ vocals?: AudioBuffer; drums?: AudioBuffer; bass?: AudioBuffer; other?: AudioBuffer; accompaniment?: AudioBuffer } | null>;
+    separateStemsServer(buffer: AudioBuffer, apiEndpoint: string, options?: { modelType?: '2stems' | '4stems' | '5stems'; quality?: 'low' | 'medium' | 'high' }): Promise<{ vocals?: AudioBuffer; drums?: AudioBuffer; bass?: AudioBuffer; other?: AudioBuffer; accompaniment?: AudioBuffer } | null>;
 }

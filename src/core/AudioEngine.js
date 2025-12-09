@@ -29,6 +29,7 @@ export class AudioEngine {
         this.state = AudioState.IDLE;
         this.activeSource = null;
         this.playbackStartTime = 0;
+        this.currentPlaybackRate = 1.0;
 
         this.recordedChunks = [];
         this.recordingBuffer = []; // {min, max} pairs for visualization
@@ -262,13 +263,15 @@ export class AudioEngine {
         }
     }
 
-    play(buffer, trimStart, trimEnd, loop = false) {
+    play(buffer, trimStart, trimEnd, loop = false, playbackRate = 1.0) {
         this.stop();
 
         const source = this.context.createBufferSource();
         this.activeSource = source;
 
         source.buffer = buffer;
+        source.playbackRate.value = playbackRate;
+        this.currentPlaybackRate = playbackRate;
 
         // Build effects chain
         let currentNode = source;
@@ -339,14 +342,19 @@ export class AudioEngine {
         const duration = buffer.duration;
         const start = trimStart * duration;
         const end = trimEnd * duration;
-        const playDuration = end - start;
+        const bufferDuration = end - start;
+        // playDuration parameter to source.start() is in real-time, not buffer-time
+        // When playbackRate != 1.0, we need to convert buffer-time to real-time
+        const playDuration = source.loop ? undefined : bufferDuration / playbackRate;
 
         source.loop = loop;
         source.loopStart = start;
         source.loopEnd = end;
 
-        source.start(0, start, source.loop ? undefined : playDuration);
-        this.playbackStartTime = this.context.currentTime - start;
+        source.start(0, start, playDuration);
+        // Store the actual real-time when playback started (not adjusted for buffer offset)
+        // The buffer offset will be accounted for in the playhead calculation
+        this.playbackStartTime = this.context.currentTime;
 
         source.onended = () => {
             if (this.activeSource === source) {
@@ -361,6 +369,7 @@ export class AudioEngine {
             this.activeSource.stop();
             this.activeSource = null;
         }
+        this.currentPlaybackRate = 1.0;
     }
 
     playSnippet(buffer, startPct, durationSec = 0.2) {
@@ -833,5 +842,107 @@ export class AudioEngine {
         }
 
         return new Blob([bufferArr], { type: 'audio/wav' });
+    }
+
+    // --- Audio Analysis Methods ---
+
+    /**
+     * Detect BPM from audio buffer
+     * @param {AudioBuffer} buffer - Audio buffer to analyze
+     * @returns {Promise<{bpm: number, threshold: number} | null>}
+     */
+    async detectBPM(buffer) {
+        // Dynamic import to avoid loading in core engine
+        const { detectBPM } = await import('../utils/bpmDetector.js');
+        return await detectBPM(buffer);
+    }
+
+    /**
+     * Detect musical key from audio buffer
+     * @param {AudioBuffer} buffer - Audio buffer to analyze
+     * @returns {Promise<{key: string, mode: 'major'|'minor', confidence: number} | null>}
+     */
+    async detectKey(buffer) {
+        // Dynamic import to avoid loading in core engine
+        const { detectKey } = await import('../utils/keyDetector.js');
+        return await detectKey(buffer);
+    }
+
+    /**
+     * Analyze audio buffer for both key and BPM
+     * @param {AudioBuffer} buffer - Audio buffer to analyze
+     * @returns {Promise<{key: {key: string, mode: string, confidence: number} | null, bpm: {bpm: number, threshold: number} | null}>}
+     */
+    async analyzeAudio(buffer) {
+        const [keyResult, bpmResult] = await Promise.all([
+            this.detectKey(buffer).catch(err => {
+                console.error('Key detection error:', err);
+                return null;
+            }),
+            this.detectBPM(buffer).catch(err => {
+                console.error('BPM detection error:', err);
+                return null;
+            })
+        ]);
+
+        return {
+            key: keyResult,
+            bpm: bpmResult
+        };
+    }
+
+    // --- Time Stretching Methods ---
+
+    /**
+     * Time stretch audio buffer without changing pitch
+     * @param {AudioBuffer} buffer - Audio buffer to stretch
+     * @param {number} stretchRatio - Stretch ratio (0.25 to 4.0, 0.5 = half speed, 2.0 = double speed)
+     * @param {Function} onProgress - Optional progress callback (0-1)
+     * @returns {Promise<AudioBuffer>}
+     */
+    async timeStretch(buffer, stretchRatio, onProgress = null) {
+        const { timeStretch } = await import('../utils/timeStretcher.js');
+        return await timeStretch(buffer, { 
+            stretchRatio, 
+            method: 'simple',
+            onProgress: onProgress || undefined
+        });
+    }
+
+    /**
+     * Time stretch with pitch shift
+     * @param {AudioBuffer} buffer - Audio buffer to process
+     * @param {number} stretchRatio - Time stretch ratio
+     * @param {number} pitchShiftSemitones - Pitch shift in semitones
+     * @returns {Promise<AudioBuffer>}
+     */
+    async timeStretchWithPitch(buffer, stretchRatio, pitchShiftSemitones) {
+        const { timeStretchWithPitch } = await import('../utils/timeStretcher.js');
+        return await timeStretchWithPitch(buffer, stretchRatio, pitchShiftSemitones);
+    }
+
+    // --- Stem Separation Methods ---
+
+    /**
+     * Separate audio into stems (vocals, drums, bass, other)
+     * @param {AudioBuffer} buffer - Audio buffer to separate
+     * @param {object} options - Separation options
+     * @returns {Promise<{vocals?: AudioBuffer, drums?: AudioBuffer, bass?: AudioBuffer, other?: AudioBuffer} | null>}
+     */
+    async separateStems(buffer, options = {}) {
+        const { separateStems } = await import('../utils/stemSeparator.js');
+        return await separateStems(buffer, options);
+    }
+
+    /**
+     * Separate stems using server-side processing
+     * @param {AudioBuffer} buffer - Audio buffer to separate
+     * @param {string} apiEndpoint - Server API endpoint
+     * @param {object} options - Separation options
+     * @returns {Promise<{vocals?: AudioBuffer, drums?: AudioBuffer, bass?: AudioBuffer, other?: AudioBuffer} | null>}
+     */
+    async separateStemsServer(buffer, apiEndpoint, options = {}) {
+        const { separateStemsServer } = await import('../utils/stemSeparator.js');
+        return await separateStemsServer(buffer, options, apiEndpoint);
     }
 }

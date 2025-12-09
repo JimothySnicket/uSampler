@@ -174,7 +174,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                         <span className="flex items-center gap-1">
                                             <Clock className="w-3 h-3" /> {sample.duration}
                                         </span>
-                                        <span className="bg-zinc-800 px-1 rounded text-zinc-500">{sample.bpm} BPM</span>
+                                        <span className="bg-zinc-800 px-1 rounded text-zinc-500">
+                                            {sample.detectedBPM || sample.bpm} BPM
+                                        </span>
+                                        {sample.detectedKey && (
+                                            <span className="bg-zinc-800 px-1 rounded text-zinc-400">
+                                                {sample.detectedKey.key} {sample.detectedKey.mode === 'major' ? 'maj' : 'min'}
+                                            </span>
+                                        )}
                                     </div>
 
                                     {/* Hover Actions (Absolute) */}

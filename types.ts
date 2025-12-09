@@ -26,6 +26,28 @@ export interface Sample {
   
   // Chopping
   chops?: Chop[]; // Array of chops for this sample
+  
+  // Audio Analysis
+  detectedBPM?: number;
+  detectedKey?: {
+    key: string;
+    mode: 'major' | 'minor';
+    confidence: number;
+  };
+  isAnalyzing?: boolean;
+  
+  // Processing states
+  isTimeStretching?: boolean;
+  isSeparatingStems?: boolean;
+  
+  // Separated stems (if available)
+  stems?: {
+    vocals?: AudioBuffer;
+    drums?: AudioBuffer;
+    bass?: AudioBuffer;
+    other?: AudioBuffer;
+    accompaniment?: AudioBuffer;
+  };
 }
 
 export interface Region {
@@ -46,5 +68,6 @@ export enum TabView {
   CHOP = 'CHOP',
   EQ = 'EQ',
   FX = 'FX',
-  AI = 'AI'
+  TIME_STRETCH = 'TIME_STRETCH',
+  STEM_SEPARATION = 'STEM_SEPARATION'
 }
