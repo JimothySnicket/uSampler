@@ -22,6 +22,7 @@ export declare class AudioEngine {
     activeSource: AudioBufferSourceNode | null;
     playbackStartTime: number;
     currentPlaybackRate: number;
+    isLooping: boolean;
     recordedChunks: BlobPart[];
     recordingBuffer: { min: number; max: number }[];
     onRecordingDataAvailable: ((blob: Blob) => void) | null;
@@ -39,7 +40,7 @@ export declare class AudioEngine {
     startRecording(): void;
     stopRecording(): void;
     play(buffer: AudioBuffer, trimStart: number, trimEnd: number, loop: boolean, playbackRate?: number): void;
-    stop(): void;
+    stop(fadeOut?: boolean): void;
     playSnippet(buffer: AudioBuffer, startPct: number, durationSec?: number): void;
     getAnalyserData(timeData: Uint8Array): void;
     getStereoLevels(): { left: number; right: number };
@@ -54,12 +55,29 @@ export declare class AudioEngine {
     resampleBuffer(buffer: AudioBuffer, targetSampleRate: number): Promise<AudioBuffer>;
     downsample(buffer: AudioBuffer, targetRate: number): Promise<AudioBuffer>;
     bitcrush(buffer: AudioBuffer, bitDepth: number): AudioBuffer;
-    detectTransients(buffer: AudioBuffer, threshold?: number, minSilenceDuration?: number): number[];
+    detectTransients(buffer: AudioBuffer, thresholdPercent?: number, options?: {
+        detectedBPM?: number | null;
+        bpmConfidence?: number;
+        bpmWeight?: number;
+        lookbackMs?: number;
+        beatTolerance?: number;
+    }): Promise<number[]>;
+    detectTransientsFallback(buffer: AudioBuffer, thresholdPercent?: number): number[];
     createChops(buffer: AudioBuffer, chopPoints: number[]): Array<{ buffer: AudioBuffer; startFrame: number; endFrame: number; startTime: number; endTime: number }>;
     equalDivide(buffer: AudioBuffer, sliceCount: number): Array<{ buffer: AudioBuffer; startFrame: number; endFrame: number; startTime: number; endTime: number }>;
     applyEffectsAndResample(buffer: AudioBuffer, targetSampleRate?: number | null): Promise<AudioBuffer>;
     setDelay(time: number, feedback: number, mix: number): void;
     setReverb(roomSize: number, damping: number, mix: number): void;
+    setEQ(params: {
+        enabled?: boolean;
+        lowGain?: number;
+        lowFreq?: number;
+        midGain?: number;
+        midFreq?: number;
+        midQ?: number;
+        highGain?: number;
+        highFreq?: number;
+    }): void;
     getSampleRate(): number;
     bufferToBlob(buffer: AudioBuffer): Blob;
     detectBPM(buffer: AudioBuffer): Promise<{ bpm: number; threshold: number } | null>;

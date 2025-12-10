@@ -5,9 +5,11 @@ interface ProcessingDialogProps {
     isOpen: boolean;
     title: string;
     description: string;
-    processingType: 'crop' | 'normalize' | 'filter' | 'adsr' | 'chop';
+    processingType: 'crop' | 'normalize' | 'filter' | 'adsr' | 'chop' | 'chop-with-processing' | 'filter-with-crop' | 'timeStretch-with-crop';
     onConfirm: () => void;
     onCancel: () => void;
+    onApplyAndChop?: () => void; // For chop-with-processing dialog
+    onApplyWithCrop?: () => void; // For filter/timeStretch-with-crop dialog
     estimatedTime?: string;
 }
 
@@ -18,6 +20,8 @@ export const ProcessingDialog: React.FC<ProcessingDialogProps> = ({
     processingType,
     onConfirm,
     onCancel,
+    onApplyAndChop,
+    onApplyWithCrop,
     estimatedTime
 }) => {
     if (!isOpen) return null;
@@ -34,6 +38,12 @@ export const ProcessingDialog: React.FC<ProcessingDialogProps> = ({
                 return '🎚️';
             case 'chop':
                 return '🔪';
+            case 'chop-with-processing':
+                return '🔪';
+            case 'filter-with-crop':
+                return '🎛️';
+            case 'timeStretch-with-crop':
+                return '⏱️';
             default:
                 return '⚙️';
         }
@@ -51,6 +61,12 @@ export const ProcessingDialog: React.FC<ProcessingDialogProps> = ({
                 return 'purple';
             case 'chop':
                 return 'red';
+            case 'chop-with-processing':
+                return 'red';
+            case 'filter-with-crop':
+                return 'yellow';
+            case 'timeStretch-with-crop':
+                return 'indigo';
             default:
                 return 'zinc';
         }
@@ -103,28 +119,69 @@ export const ProcessingDialog: React.FC<ProcessingDialogProps> = ({
                 </div>
 
                 {/* Action Buttons */}
-                <div className="flex gap-3">
-                    <button
-                        onClick={onCancel}
-                        className="flex-1 px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-md font-semibold transition-colors border border-zinc-700"
-                    >
-                        Cancel
-                    </button>
-                    <button
-                        onClick={onConfirm}
-                        className={`flex-1 px-4 py-2.5 rounded-md font-semibold transition-colors border ${
-                            getColor() === 'indigo' ? 'bg-indigo-600 hover:bg-indigo-500 border-indigo-500 text-white' :
-                            getColor() === 'green' ? 'bg-green-600 hover:bg-green-500 border-green-500 text-white' :
-                            getColor() === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-500 border-yellow-500 text-white' :
-                            getColor() === 'purple' ? 'bg-purple-600 hover:bg-purple-500 border-purple-500 text-white' :
-                            getColor() === 'red' ? 'bg-red-600 hover:bg-red-500 border-red-500 text-white' :
-                            'bg-zinc-600 hover:bg-zinc-500 border-zinc-500 text-white'
-                        } flex items-center justify-center gap-2`}
-                    >
-                        <Check className="w-4 h-4" />
-                        Apply Processing
-                    </button>
-                </div>
+                {(processingType === 'chop-with-processing' && onApplyAndChop) || 
+                 ((processingType === 'filter-with-crop' || processingType === 'timeStretch-with-crop') && onApplyWithCrop) ? (
+                    <div className="flex flex-col gap-3">
+                        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-md p-3 mb-2">
+                            <p className="text-sm text-yellow-400 font-semibold mb-1">Pending Crop Detected</p>
+                            <p className="text-xs text-zinc-400">
+                                {processingType === 'chop-with-processing' 
+                                    ? 'You have region adjustments or EQ settings active. Choose how to proceed:'
+                                    : 'You have region adjustments active. Apply the crop as well?'}
+                            </p>
+                        </div>
+                        <div className="flex gap-3">
+                            <button
+                                onClick={onCancel}
+                                className="flex-1 px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-md font-semibold transition-colors border border-zinc-700"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={onConfirm}
+                                className="flex-1 px-4 py-2.5 bg-zinc-700 hover:bg-zinc-600 text-white rounded-md font-semibold transition-colors border border-zinc-600 flex items-center justify-center gap-2"
+                            >
+                                {processingType === 'chop-with-processing' ? 'Chop Only' : 
+                                 processingType === 'filter-with-crop' ? 'Apply EQ Only' : 'Time Stretch Only'}
+                            </button>
+                            <button
+                                onClick={processingType === 'chop-with-processing' ? onApplyAndChop : onApplyWithCrop}
+                                className={`flex-1 px-4 py-2.5 border text-white rounded-md font-semibold transition-colors flex items-center justify-center gap-2 ${
+                                    processingType === 'chop-with-processing' ? 'bg-red-600 hover:bg-red-500 border-red-500' :
+                                    processingType === 'filter-with-crop' ? 'bg-yellow-600 hover:bg-yellow-500 border-yellow-500' :
+                                    'bg-indigo-600 hover:bg-indigo-500 border-indigo-500'
+                                }`}
+                            >
+                                <Check className="w-4 h-4" />
+                                {processingType === 'chop-with-processing' ? 'Apply & Chop' : 
+                                 processingType === 'filter-with-crop' ? 'Apply Crop & EQ' : 'Apply Crop & Stretch'}
+                            </button>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="flex gap-3">
+                        <button
+                            onClick={onCancel}
+                            className="flex-1 px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-md font-semibold transition-colors border border-zinc-700"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={onConfirm}
+                            className={`flex-1 px-4 py-2.5 rounded-md font-semibold transition-colors border ${
+                                getColor() === 'indigo' ? 'bg-indigo-600 hover:bg-indigo-500 border-indigo-500 text-white' :
+                                getColor() === 'green' ? 'bg-green-600 hover:bg-green-500 border-green-500 text-white' :
+                                getColor() === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-500 border-yellow-500 text-white' :
+                                getColor() === 'purple' ? 'bg-purple-600 hover:bg-purple-500 border-purple-500 text-white' :
+                                getColor() === 'red' ? 'bg-red-600 hover:bg-red-500 border-red-500 text-white' :
+                                'bg-zinc-600 hover:bg-zinc-500 border-zinc-500 text-white'
+                            } flex items-center justify-center gap-2`}
+                        >
+                            <Check className="w-4 h-4" />
+                            Apply Processing
+                        </button>
+                    </div>
+                )}
             </div>
         </div>
     );

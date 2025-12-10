@@ -16,6 +16,7 @@ interface WaveformDisplayProps {
   onChopClick?: (chopId: string) => void;
   onChopUpdate?: (chops: Chop[]) => void;
   previewMode?: boolean;
+  isLooping?: boolean;
 }
 
 export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
@@ -29,7 +30,8 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
   chopsLinked = true,
   onChopClick,
   onChopUpdate,
-  previewMode = false
+  previewMode = false,
+  isLooping = false
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -45,6 +47,21 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
   const [dragStartScroll, setDragStartScroll] = useState(0);
   const [draggingChopId, setDraggingChopId] = useState<string | null>(null);
   const [dragStartChops, setDragStartChops] = useState<Chop[]>([]);
+  const prevSampleIdRef = useRef<string | undefined>(sample?.id);
+
+  // Reset zoom when sample changes or when a new sample is created
+  useEffect(() => {
+    const currentSampleId = sample?.id;
+    const prevSampleId = prevSampleIdRef.current;
+    
+    // Reset zoom if sample ID changed (different sample selected or new sample created)
+    if (currentSampleId !== prevSampleId && prevSampleId !== undefined) {
+      setZoom(1.0);
+      setScrollOffset(0.0);
+    }
+    
+    prevSampleIdRef.current = currentSampleId;
+  }, [sample?.id]);
 
   // Initialize Visualizer
   useEffect(() => {
@@ -460,10 +477,29 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
             // Get playback rate (accounts for time-stretching)
             const playbackRate = engine.currentPlaybackRate || 1.0;
             
-            // When time-stretching (playbackRate != 1.0), preview plays the full buffer (0, 1)
-            // Otherwise, use the region prop which may be a cropped selection
-            const actualRegionStart = playbackRate !== 1.0 ? 0 : region.start;
-            const actualRegionEnd = playbackRate !== 1.0 ? 1 : region.end;
+            // Determine which region is actually playing
+            // The audio engine always plays from trimStart to trimEnd (region), even when time-stretching
+            // If previewMode and a chop is active, use the chop's region
+            // Otherwise, use the region prop (which matches what the audio engine plays)
+            let actualRegionStart: number;
+            let actualRegionEnd: number;
+            
+            if (previewMode && activeChopId && chops) {
+              // When previewing a chop, use the chop's region
+              const activeChop = chops.find(c => c.id === activeChopId);
+              if (activeChop) {
+                actualRegionStart = activeChop.start;
+                actualRegionEnd = activeChop.end;
+              } else {
+                actualRegionStart = region.start;
+                actualRegionEnd = region.end;
+              }
+            } else {
+              // Normal playback and time-stretching both use the region prop
+              // The audio engine plays from trimStart to trimEnd regardless of playback rate
+              actualRegionStart = region.start;
+              actualRegionEnd = region.end;
+            }
             
             // The region being played (in seconds of the buffer)
             const regionStartTime = actualRegionStart * duration;
@@ -478,7 +514,17 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
             
             // Calculate current position in the buffer
             // Start from the region start and add the elapsed buffer time
-            const bufferPosition = regionStartTime + bufferTimeElapsed;
+            let bufferPosition = regionStartTime + bufferTimeElapsed;
+            
+            // If looping, wrap the position back to start when it exceeds the end
+            if (isLooping && engine.isLooping) {
+              // Calculate position within the loop cycle
+              // Use modulo to wrap: when bufferTimeElapsed exceeds regionDuration, wrap back to start
+              bufferPosition = regionStartTime + (bufferTimeElapsed % regionDuration);
+            } else if (bufferPosition > regionEndTime) {
+              // Non-looping: clamp to end when it exceeds
+              bufferPosition = regionEndTime;
+            }
             
             // Effective playback duration: how long playback takes in real-time
             // When playbackRate < 1.0 (slower), playback takes longer in real-time
@@ -490,17 +536,23 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
             // stays visible until playback actually ends
             const tolerance = 0.5; // Increased tolerance to prevent premature disappearance
             
+            // When looping, always show playhead
             // When time-stretching, only check elapsed time (buffer position will reach end before playback completes)
             // When normal playback, check both for safety
             // For time-stretching, also ensure we haven't exceeded the buffer end significantly
-            const shouldShowPlayhead = playbackRate !== 1.0 
-              ? elapsed <= effectivePlaybackDuration + tolerance && bufferPosition <= regionEndTime + (duration * 0.1) // Allow slight overshoot
-              : elapsed <= effectivePlaybackDuration + tolerance && bufferPosition <= regionEndTime + tolerance;
+            const shouldShowPlayhead = isLooping && engine.isLooping
+              ? true // Always show when looping
+              : playbackRate !== 1.0 
+                ? elapsed <= effectivePlaybackDuration + tolerance && bufferPosition <= regionEndTime + (duration * 0.1) // Allow slight overshoot
+                : elapsed <= effectivePlaybackDuration + tolerance && bufferPosition <= regionEndTime + tolerance;
 
             if (shouldShowPlayhead) {
               // Clamp buffer position to valid range (always keep within buffer bounds)
+              // When looping, position is already wrapped
               // When time-stretching and buffer position exceeds end, keep it at the end
-              currentPos = Math.max(regionStartTime, Math.min(bufferPosition, regionEndTime));
+              currentPos = isLooping && engine.isLooping
+                ? bufferPosition // Already wrapped for loops
+                : Math.max(regionStartTime, Math.min(bufferPosition, regionEndTime));
               
               // Normalize to 0-1 for full buffer and draw playhead
               // When at end of buffer during stretch, keep playhead at end (1.0) until playback completes
@@ -546,7 +598,7 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
 
     animate();
     return () => cancelAnimationFrame(animId);
-  }, [engine, sample, isPlaying, isRecording, region, normalizedToPixel, chops, activeChopId, previewMode]);
+  }, [engine, sample, isPlaying, isRecording, region, normalizedToPixel, chops, activeChopId, previewMode, isLooping]);
 
   if (!sample && !isRecording) {
     return (

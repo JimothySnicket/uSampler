@@ -1,49 +1,130 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useAudio } from './src/context/AudioContext';
+import { usePlaybackStore } from './src/stores/playbackStore';
+
+// Chrome Extension API type declarations
+interface ChromeWindow {
+    id?: number;
+    width?: number;
+    height?: number;
+}
+
+interface ChromeWindowsAPI {
+    getCurrent: (callback: (window: ChromeWindow) => void) => void;
+    get: (windowId: number, callback: (window: ChromeWindow) => void) => void;
+    update: (windowId: number, updateInfo: { width?: number; height?: number }, callback?: () => void) => void;
+    onBoundsChanged?: {
+        addListener: (callback: (window: ChromeWindow) => void) => void;
+        removeListener: (callback: (window: ChromeWindow) => void) => void;
+    };
+}
+
+declare const chrome: {
+    windows?: ChromeWindowsAPI;
+} | undefined;
 import {
     Play, Pause, Square, SkipBack, Scissors,
-    Sliders, Lock, MonitorPlay, ChevronDown, RefreshCcw, Crop, Volume2, AudioWaveform, Keyboard, ChevronRight, Sparkles, Loader2, Gauge, Split
+    Sliders, Lock, MonitorPlay, ChevronDown, RefreshCcw, Crop, Volume2, AudioWaveform, Keyboard, ChevronRight, Sparkles, Loader2, Gauge, Split, Power, Repeat
 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { WaveformDisplay } from './components/WaveformDisplay';
 import { UnifiedControl } from './components/UnifiedControl';
 import { PaddleControl } from './components/PaddleControl';
 import { ProcessingDialog } from './components/ProcessingDialog';
+import { EQKnob } from './components/EQKnob';
+import { EQVisualizer } from './components/EQVisualizer';
+import { EQWaveformVisualizer } from './components/EQWaveformVisualizer';
+import { EQOscilloscopeVisualizer } from './components/EQOscilloscopeVisualizer';
+import { EQCombinedVisualizer } from './components/EQCombinedVisualizer';
 import { formatDuration, audioBufferToWav } from './src/utils/audioUtils';
 import { Sample, Region, TabView, Chop } from './types';
 import { AudioState } from './src/core/AudioEngine';
 import JSZip from 'jszip';
 
 // Dev version - increment this number with each update
-const DEV_VERSION = '2.3';
+const DEV_VERSION = '2.4';
 
 export default function App() {
     const { engine, state, startRecording, stopRecording, toggleArm, isArmed, selectSource, setRecordingCallback } = useAudio();
 
     const isRecording = state === AudioState.RECORDING;
-    const [isPlaying, setIsPlaying] = useState(false);
-    const [playbackTime, setPlaybackTime] = useState({ current: 0, total: 0 });
+    
+    // Zustand store selectors
+    // Select state values - these will trigger re-renders when they change
+    const isPlaying = usePlaybackStore(state => state.isPlaying);
+    const isLooping = usePlaybackStore(state => state.isLooping);
+    const playbackTime = usePlaybackStore(state => state.playbackTime);
+    const activeSampleId = usePlaybackStore(state => state.activeSampleId);
+    
+    
+    // Select actions - Zustand ensures these are stable references
+    const setActiveSample = usePlaybackStore(state => state.setActiveSample);
+    const setLooping = usePlaybackStore(state => state.setLooping);
+    const setPlaying = usePlaybackStore(state => state.setPlaying);
+    const setPlaybackTime = usePlaybackStore(state => state.setPlaybackTime);
+    const setRegion = usePlaybackStore(state => state.setRegion);
+    const getSampleRegion = usePlaybackStore(state => state.getSampleRegion);
+    const getSampleChops = usePlaybackStore(state => state.getSampleChops);
+    const setChops = usePlaybackStore(state => state.setChops);
+    const getActiveChopId = usePlaybackStore(state => state.getActiveChopId);
+    const setActiveChopId = usePlaybackStore(state => state.setActiveChopId);
+    
+    // Get current region and chops for active sample
+    // Subscribe to store state to get reactive updates
+    const sampleStates = usePlaybackStore(state => state.sampleStates);
+    const region = useMemo(() => {
+        return activeSampleId && sampleStates[activeSampleId] 
+            ? sampleStates[activeSampleId].region 
+            : { start: 0, end: 1 };
+    }, [activeSampleId, sampleStates]);
+    const chops = useMemo(() => {
+        return activeSampleId && sampleStates[activeSampleId]
+            ? sampleStates[activeSampleId].chops
+            : [];
+    }, [activeSampleId, sampleStates]);
+    const activeChopId = useMemo(() => {
+        return activeSampleId && sampleStates[activeSampleId]
+            ? sampleStates[activeSampleId].activeChopId
+            : null;
+    }, [activeSampleId, sampleStates]);
+    
+    // Loop is a global state - it affects what happens when playback reaches the end
+    // The AudioEngine's play() method will use the current loop state when starting playback
+    // When loop is ON: playback will automatically restart at the end
+    // When loop is OFF: playback will stop at the end
+    
     const [activeTab, setActiveTab] = useState<TabView>(TabView.MAIN);
     const [samples, setSamples] = useState<Sample[]>([]);
-    const [activeSampleId, setActiveSampleId] = useState<string>('');
     const [selectedSampleIds, setSelectedSampleIds] = useState<Set<string>>(new Set());
-
-    const [region, setRegion] = useState<Region>({ start: 0, end: 1 });
     const [gain, setGain] = useState(100);
     const [recThreshold, setRecThreshold] = useState(75);
     const [isMuted, setIsMuted] = useState(false);
     const [activeSourceTitle, setActiveSourceTitle] = useState('Select Source');
     const [isSourceConnected, setIsSourceConnected] = useState(false);
 
-    // Multiband filtering state
-    const [filterMode, setFilterMode] = useState<'2band' | '3band'>('2band');
-    const [lowFreq, setLowFreq] = useState(200); // Hz
-    const [highFreq, setHighFreq] = useState(8000); // Hz
-    const [lowGain, setLowGain] = useState(0); // dB
-    const [highGain, setHighGain] = useState(0); // dB
-    const [midFreq, setMidFreq] = useState(2000); // Hz (for 3-band)
-    const [midGain, setMidGain] = useState(0); // dB (for 3-band)
-    const [midQ, setMidQ] = useState(1); // Q factor (for 3-band)
+    // Multiband filtering state (3-band EQ defaults matching design) - from Zustand store
+    const eqSettings = usePlaybackStore(state => state.eqSettings);
+    const eqEnabled = eqSettings.enabled;
+    const lowFreq = eqSettings.lowFreq;
+    const highFreq = eqSettings.highFreq;
+    const lowGain = eqSettings.lowGain;
+    const highGain = eqSettings.highGain;
+    const midFreq = eqSettings.midFreq;
+    const midGain = eqSettings.midGain;
+    const midQ = eqSettings.midQ;
+    const setEQEnabled = usePlaybackStore(state => state.setEQEnabled);
+    const setEQGain = usePlaybackStore(state => state.setEQGain);
+    const setEQFreq = usePlaybackStore(state => state.setEQFreq);
+    const setMidQ = usePlaybackStore(state => state.setMidQ);
+    
+    // Local setters for backward compatibility
+    const setEqEnabled = (enabled: boolean) => setEQEnabled(enabled);
+    const setLowFreq = (freq: number) => setEQFreq('low', freq);
+    const setHighFreq = (freq: number) => setEQFreq('high', freq);
+    const setLowGain = (gain: number) => setEQGain('low', gain);
+    const setHighGain = (gain: number) => setEQGain('high', gain);
+    const setMidFreq = (freq: number) => setEQFreq('mid', freq);
+    const setMidGain = (gain: number) => setEQGain('mid', gain);
 
     // ADSR state
     const [adsrMode, setAdsrMode] = useState<'envelope' | 'gate'>('envelope');
@@ -58,16 +139,15 @@ export default function App() {
     const [gateAttack, setGateAttack] = useState(0.01); // seconds
     const [gateRelease, setGateRelease] = useState(0.1); // seconds
 
-    // Chopping state
-    const [chopThreshold, setChopThreshold] = useState(10); // %
+    // Chopping state (chops and activeChopId now from store, others remain local)
+    const [chopThreshold, setChopThreshold] = useState(30); // % (higher = fewer chops)
+    const [bpmWeight, setBpmWeight] = useState<number | null>(null); // null = auto, 0-1 = manual weight
     const [chopSliceCount, setChopSliceCount] = useState(8);
-    const [chops, setChops] = useState<Chop[]>([]);
-    const [activeChopId, setActiveChopId] = useState<string | null>(null);
     const [chopsLinked, setChopsLinked] = useState(true); // Default linked
     const [keyboardMappingEnabled, setKeyboardMappingEnabled] = useState(false);
     const [expandedSamples, setExpandedSamples] = useState<Set<string>>(new Set());
-    const [thresholdChoppingEnabled, setThresholdChoppingEnabled] = useState(false);
-    const [chopSubTab, setChopSubTab] = useState<'threshold' | 'equal' | 'manual'>('threshold');
+    const [autoChoppingEnabled, setAutoChoppingEnabled] = useState(false);
+    const [chopSubTab, setChopSubTab] = useState<'auto' | 'equal' | 'manual'>('auto');
 
     // Sample rate selector
     const [exportSampleRate, setExportSampleRate] = useState<number | null>(null);
@@ -75,8 +155,10 @@ export default function App() {
     // Processing dialog state
     const [processingDialog, setProcessingDialog] = useState<{
         isOpen: boolean;
-        type: 'crop' | 'normalize' | 'filter' | 'adsr' | 'chop';
+        type: 'crop' | 'normalize' | 'filter' | 'adsr' | 'chop' | 'chop-with-processing' | 'filter-with-crop' | 'timeStretch-with-crop';
         onConfirm: () => void;
+        onApplyAndChop?: () => void; // For chop-with-processing dialog
+        onApplyWithCrop?: () => void; // For filter/timeStretch-with-crop dialog
     } | null>(null);
 
     // Edit mode (individual vs all)
@@ -85,19 +167,31 @@ export default function App() {
     // Manual chopping state
     const [manualChoppingEnabled, setManualChoppingEnabled] = useState(false);
     const [manualChopPoints, setManualChopPoints] = useState<number[]>([]);
+    
+    // Track which samples have manually edited chops (to prevent auto chop from overwriting)
+    const [manuallyEditedChops, setManuallyEditedChops] = useState<Set<string>>(new Set());
 
     // Resizable splitter state (0.4 = 40% waveform, 60% controls)
     const [splitRatio, setSplitRatio] = useState(0.4);
     const [isResizing, setIsResizing] = useState(false);
 
-    // Time stretching state
-    const [timeStretchRatio, setTimeStretchRatio] = useState(1.0);
+    // Time stretching state - from Zustand store
+    const timeStretchRatio = usePlaybackStore(state => state.timeStretchRatio);
+    const timeStretchEnabled = usePlaybackStore(state => state.timeStretchEnabled);
+    const isPreviewingStretch = usePlaybackStore(state => state.isPreviewingStretch);
+    const setTimeStretchRatio = usePlaybackStore(state => state.setTimeStretchRatio);
+    const setTimeStretchEnabled = usePlaybackStore(state => state.setTimeStretchEnabled);
+    const setPreviewingStretch = usePlaybackStore(state => state.setPreviewingStretch);
     const [timeStretchProgress, setTimeStretchProgress] = useState(0);
-    const [isPreviewingStretch, setIsPreviewingStretch] = useState(false);
+    
+    // Local setter for backward compatibility
+    const setIsPreviewingStretch = (previewing: boolean) => setPreviewingStretch(previewing);
     const [targetTempo, setTargetTempo] = useState<number | null>(null);
     const [syncToTempo, setSyncToTempo] = useState(false);
     const [isDetectingBPM, setIsDetectingBPM] = useState(false);
     const prevStretchRatioRef = useRef<number>(1.0);
+    const prevTimeStretchEnabledRef = useRef<boolean>(false);
+    const restartTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
     // Stem separation state
     const [stemModelType, setStemModelType] = useState<'2stems' | '4stems' | '5stems'>('4stems');
@@ -132,7 +226,7 @@ export default function App() {
 
             console.log('[App] Creating new sample:', newSample.name);
             setSamples(prev => [newSample, ...prev]);
-            setActiveSampleId(newSample.id);
+            setActiveSample(newSample.id);
         });
     }, [setRecordingCallback]);
 
@@ -187,18 +281,89 @@ export default function App() {
         };
     }, [isResizing]);
 
+    // Ensure window opens at correct size and optionally maintain aspect ratio on resize
+    useEffect(() => {
+        // Check if chrome.windows API is available
+        if (typeof chrome === 'undefined' || !chrome.windows) {
+            return;
+        }
+
+        let windowId: number | null = null;
+
+        // Get current window ID and ensure correct initial size
+        chrome.windows.getCurrent((window) => {
+            if (window && window.id) {
+                windowId = window.id;
+                // Ensure window is at correct size on mount with a small delay
+                setTimeout(() => {
+                    chrome.windows!.getCurrent((currentWindow) => {
+                        if (currentWindow && currentWindow.id && 
+                            (currentWindow.width !== 1200 || currentWindow.height !== 900)) {
+                            chrome.windows!.update(currentWindow.id, {
+                                width: 1200,
+                                height: 900
+                            });
+                        }
+                    });
+                }, 200);
+            }
+        });
+    }, []);
+
     // Sync playback end and volume, and check source connection status
     useEffect(() => {
         if (engine) {
             engine.onPlaybackEnded = () => {
-                setIsPlaying(false);
-                setPlaybackTime({ current: 0, total: 0 });
+                // Read current loop state from store (source of truth)
+                // This callback fires when playback ends naturally - check loop state to decide whether to loop or stop
+                const store = usePlaybackStore.getState();
+                const currentLoopState = store.isLooping; // Check store value - it's the global toggle
+                
+                // Also get current sample state from store to avoid stale closures
+                const currentActiveSampleId = store.activeSampleId;
+                const currentSampleStates = store.sampleStates;
+                const currentRegion = currentActiveSampleId && currentSampleStates[currentActiveSampleId] 
+                    ? currentSampleStates[currentActiveSampleId].region 
+                    : { start: 0, end: 1 };
+                const currentChops = currentActiveSampleId && currentSampleStates[currentActiveSampleId]
+                    ? currentSampleStates[currentActiveSampleId].chops
+                    : [];
+                const currentActiveChopId = currentActiveSampleId && currentSampleStates[currentActiveSampleId]
+                    ? currentSampleStates[currentActiveSampleId].activeChopId
+                    : null;
+                
+                if (currentLoopState && activeSample?.buffer) {
+                    // Loop is ON - restart playback at the crop/region start
+                    // We handle looping manually (not using AudioBufferSourceNode loop)
+                    setTimeout(() => {
+                        if (engine && activeSample?.buffer && !engine.activeSource) {
+                            // Use current values from store/closure
+                            const chopToUse = currentActiveChopId && activeTab === TabView.CHOP
+                                ? currentChops.find(c => c.id === currentActiveChopId)
+                                : null;
+                            
+                            const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
+                            if (chopToUse && activeSample.buffer) {
+                                engine.play(activeSample.buffer, chopToUse.start, chopToUse.end, true, playbackRate);
+                                setPlaying(true);
+                            } else if (activeSample.buffer) {
+                                engine.play(activeSample.buffer, currentRegion.start, currentRegion.end, true, playbackRate);
+                                setPlaying(true);
+                            }
+                        }
+                    }, 10);
+                } else {
+                    // Loop is OFF - stop playback normally
+                    setPlaying(false);
+                    setPlaybackTime({ current: 0, total: 0 });
+                }
             };
             engine.setVolume(isMuted ? 0 : gain / 100);
             // Check if source is connected
             setIsSourceConnected(!!engine.sourceNode);
         }
-    }, [engine, gain, isMuted, state]); // Include state to detect when recording starts/stops
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [engine, gain, isMuted, state, activeSample, activeChopId, activeTab, region, chops]); // Include dependencies for loop restart
 
     // Update playback time display
     useEffect(() => {
@@ -232,17 +397,65 @@ export default function App() {
             const duration = activeSample.buffer.duration;
             const playbackRate = engine.currentPlaybackRate || 1.0;
             
-            // Calculate region duration (what's actually being played)
-            const regionDuration = duration * (region.end - region.start);
-            const effectiveDuration = regionDuration / playbackRate;
+            // Determine which region is actually being played
+            let actualRegionDuration: number;
+            if (activeChopId && activeTab === TabView.CHOP) {
+                const chop = chops.find(c => c.id === activeChopId);
+                if (chop) {
+                    actualRegionDuration = duration * (chop.end - chop.start);
+                } else {
+                    actualRegionDuration = duration * (region.end - region.start);
+                }
+            } else {
+                actualRegionDuration = duration * (region.end - region.start);
+            }
+            const effectiveDuration = actualRegionDuration / playbackRate;
 
             if (engine.playbackStartTime > 0) {
                 const elapsed = engine.context.currentTime - engine.playbackStartTime;
-                // playbackStartTime includes the regionStartTime offset, so subtract it to get actual playback time
-                const regionStartTime = duration * region.start;
-                const actualPlaybackTime = elapsed - regionStartTime;
-                // Current position relative to the region being played (1 second per second)
-                const currentPos = Math.max(0, Math.min(actualPlaybackTime, regionDuration));
+                const playbackRate = engine.currentPlaybackRate || 1.0;
+                
+                // Determine which region is actually playing
+                let actualRegionStart: number;
+                let actualRegionEnd: number;
+                if (activeChopId && activeTab === TabView.CHOP) {
+                    const chop = chops.find(c => c.id === activeChopId);
+                    if (chop) {
+                        actualRegionStart = duration * chop.start;
+                        actualRegionEnd = duration * chop.end;
+                    } else {
+                        actualRegionStart = duration * region.start;
+                        actualRegionEnd = duration * region.end;
+                    }
+                } else {
+                    actualRegionStart = duration * region.start;
+                    actualRegionEnd = duration * region.end;
+                }
+                const actualRegionDuration = actualRegionEnd - actualRegionStart;
+                
+                // Calculate buffer time elapsed (real-time * playbackRate)
+                const bufferTimeElapsed = elapsed * playbackRate;
+                
+                // Calculate current position in the buffer
+                // If looping (either normal playback or preview with loop enabled), wrap the position back to start when it exceeds the end
+                const isCurrentlyLooping = isLooping && engine.isLooping;
+                let bufferPosition: number;
+                
+                if (isCurrentlyLooping) {
+                    // Wrap position within the region boundaries
+                    bufferPosition = actualRegionStart + (bufferTimeElapsed % actualRegionDuration);
+                } else {
+                    // Clamp to region boundaries
+                    bufferPosition = actualRegionStart + bufferTimeElapsed;
+                    if (bufferPosition > actualRegionEnd) {
+                        bufferPosition = actualRegionEnd;
+                    }
+                }
+                
+                // Current position relative to the region being played
+                const currentPos = isCurrentlyLooping
+                    ? (bufferPosition - actualRegionStart) // Position within the loop cycle
+                    : Math.max(0, Math.min(bufferPosition - actualRegionStart, actualRegionDuration));
                 setPlaybackTime({ current: currentPos, total: effectiveDuration });
             } else {
                 setPlaybackTime({ current: 0, total: effectiveDuration });
@@ -257,12 +470,12 @@ export default function App() {
         return () => {
             if (animationFrameId) cancelAnimationFrame(animationFrameId);
         };
-    }, [isPlaying, engine, activeSample, region]);
+    }, [isPlaying, engine, activeSample, region, isLooping, activeChopId, activeTab, chops]);
 
-    // Live time stretching: restart playback when ratio changes during preview
+    // Live time stretching: restart playback when ratio changes and time-stretch is enabled
     useEffect(() => {
-        // Skip on initial mount or if not previewing
-        if (!isPreviewingStretch || !isPlaying || !activeSample?.buffer || !engine || !engine.context) {
+        // Skip on initial mount or if time-stretch is not enabled or not playing
+        if (!timeStretchEnabled || !isPlaying || !activeSample?.buffer || !engine || !engine.context) {
             prevStretchRatioRef.current = timeStretchRatio;
             return;
         }
@@ -272,39 +485,171 @@ export default function App() {
             return;
         }
         
-        // Calculate current playback position
-        const elapsed = engine.context.currentTime - engine.playbackStartTime;
-        const playbackRate = engine.currentPlaybackRate || 1.0;
-        const bufferTimeElapsed = elapsed * playbackRate;
-        const currentPosition = Math.max(0, Math.min(bufferTimeElapsed / activeSample.buffer.duration, 1.0));
+        // Cancel any pending restart to prevent overlapping restarts
+        if (restartTimeoutRef.current) {
+            clearTimeout(restartTimeoutRef.current);
+            restartTimeoutRef.current = null;
+        }
         
-        // Restart playback from current position with new ratio
-        const newPlaybackRate = 1 / timeStretchRatio;
-        const originalOnPlaybackEnded = engine.onPlaybackEnded;
-        engine.onPlaybackEnded = null;
+        // Explicitly stop current playback first to prevent overlapping sources
+        // This ensures the previous source is fully stopped before starting a new one
+        engine.stop();
         
-        // Calculate start/end positions based on current position
-        const startPos = currentPosition;
-        const endPos = 1.0;
-        
-        engine.play(activeSample.buffer, startPos, endPos, false, newPlaybackRate);
-        
-        // Calculate new stretched duration for remaining portion
-        const remainingBufferDuration = activeSample.buffer.duration * (endPos - startPos);
-        const remainingStretchedDuration = remainingBufferDuration / newPlaybackRate;
-        
-        // Update timeout for remaining duration
-        setTimeout(() => {
-            setIsPreviewingStretch(false);
-            setIsPlaying(false);
-            if (engine.onPlaybackEnded === null) {
-                engine.onPlaybackEnded = originalOnPlaybackEnded;
+        // Small delay to ensure stop() completes before starting new playback
+        // This prevents race conditions where multiple sources might play simultaneously
+        restartTimeoutRef.current = setTimeout(() => {
+            // Calculate current playback position within the region
+            const elapsed = engine.context.currentTime - engine.playbackStartTime;
+            const playbackRate = engine.currentPlaybackRate || 1.0;
+            const bufferTimeElapsed = elapsed * playbackRate;
+            
+            // Calculate position relative to region start
+            const bufferDuration = activeSample.buffer.duration;
+            const regionDuration = bufferDuration * (region.end - region.start);
+            
+            // Calculate position within region, accounting for looping
+            // Use modulo to wrap position if it exceeds region duration
+            let positionInRegion = bufferTimeElapsed % regionDuration;
+            
+            // Ensure position is within valid bounds (handle edge cases)
+            if (positionInRegion < 0) {
+                positionInRegion = 0;
             }
-        }, remainingStretchedDuration * 1000);
+            if (positionInRegion > regionDuration) {
+                positionInRegion = regionDuration;
+            }
+            
+            // Calculate normalized position (0-1) within the full buffer
+            const currentPositionInBuffer = region.start * bufferDuration + positionInRegion;
+            const currentPosition = Math.max(region.start, Math.min(currentPositionInBuffer / bufferDuration, region.end));
+            
+            // Restart playback from current position with new ratio
+            // CRITICAL: Always use region.start and region.end for loop boundaries, not currentPosition
+            // This prevents tiny loops when currentPosition is close to region.start
+            const newPlaybackRate = 1 / timeStretchRatio;
+            const originalOnPlaybackEnded = engine.onPlaybackEnded;
+            engine.onPlaybackEnded = null;
+            
+            // Get current loop state from store
+            const currentLoopState = usePlaybackStore.getState().isLooping;
+            
+            // Always use full region boundaries for loop points to prevent tiny loops
+            // The AudioEngine.play() method uses trimStart/trimEnd as loop boundaries when looping is enabled
+            // By always using region.start and region.end, we ensure consistent loop boundaries
+            // Note: We restart from region.start (not currentPosition) because:
+            // 1. BufferSourceNode doesn't support seeking mid-buffer
+            // 2. Using currentPosition as startPos creates tiny loops when it's close to region.start
+            // 3. Restarting from region.start prevents the looping bug
+            // The slight position loss is acceptable compared to the looping bug
+            engine.play(activeSample.buffer, region.start, region.end, currentLoopState, newPlaybackRate);
+            
+            // Calculate new stretched duration based on full region
+            const remainingBufferDuration = bufferDuration * (region.end - region.start);
+            const remainingStretchedDuration = remainingBufferDuration / newPlaybackRate;
+            
+            // Handle playback end based on loop state
+            if (currentLoopState) {
+                // If looping, restore callback so it can handle looping
+                engine.onPlaybackEnded = originalOnPlaybackEnded;
+            } else {
+                // If not looping, stop preview when audio actually ends
+                setTimeout(() => {
+                    setPreviewingStretch(false);
+                    setPlaying(false);
+                    if (engine.onPlaybackEnded === null) {
+                        engine.onPlaybackEnded = originalOnPlaybackEnded;
+                    }
+                }, remainingStretchedDuration * 1000);
+            }
+            
+            // Update ref to track current ratio
+            prevStretchRatioRef.current = timeStretchRatio;
+            restartTimeoutRef.current = null;
+        }, 10); // Small delay to ensure stop() completes
         
-        // Update ref to track current ratio
-        prevStretchRatioRef.current = timeStretchRatio;
-    }, [timeStretchRatio, isPreviewingStretch, isPlaying, activeSample, engine]);
+        return () => {
+            if (restartTimeoutRef.current) {
+                clearTimeout(restartTimeoutRef.current);
+                restartTimeoutRef.current = null;
+            }
+        };
+    }, [timeStretchRatio, timeStretchEnabled, isPlaying, activeSample, engine, region]);
+
+    // Restart playback immediately when time-stretch toggle changes during playback
+    useEffect(() => {
+        // Skip on initial mount or if not playing
+        if (!isPlaying || !activeSample?.buffer || !engine || !engine.context) {
+            prevTimeStretchEnabledRef.current = timeStretchEnabled;
+            return;
+        }
+        
+        // Only restart if enabled state actually changed
+        if (prevTimeStretchEnabledRef.current === timeStretchEnabled) {
+            return;
+        }
+        
+        // Cancel any pending restart to prevent overlapping restarts
+        if (restartTimeoutRef.current) {
+            clearTimeout(restartTimeoutRef.current);
+            restartTimeoutRef.current = null;
+        }
+        
+        // Explicitly stop current playback first
+        engine.stop();
+        
+        // Small delay to ensure stop() completes before starting new playback
+        restartTimeoutRef.current = setTimeout(() => {
+            // Calculate current playback position within the region
+            const elapsed = engine.context.currentTime - engine.playbackStartTime;
+            const playbackRate = engine.currentPlaybackRate || 1.0;
+            const bufferTimeElapsed = elapsed * playbackRate;
+            
+            // Calculate position relative to region start
+            const bufferDuration = activeSample.buffer.duration;
+            const regionDuration = bufferDuration * (region.end - region.start);
+            
+            // Calculate position within region, accounting for looping
+            let positionInRegion = bufferTimeElapsed % regionDuration;
+            
+            // Ensure position is within valid bounds
+            if (positionInRegion < 0) {
+                positionInRegion = 0;
+            }
+            if (positionInRegion > regionDuration) {
+                positionInRegion = regionDuration;
+            }
+            
+            // Calculate normalized position (0-1) within the full buffer
+            const currentPositionInBuffer = region.start * bufferDuration + positionInRegion;
+            const currentPosition = Math.max(region.start, Math.min(currentPositionInBuffer / bufferDuration, region.end));
+            
+            // Calculate playback rate based on new enabled state
+            const newPlaybackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
+            const originalOnPlaybackEnded = engine.onPlaybackEnded;
+            engine.onPlaybackEnded = null;
+            
+            // Get current loop state from store
+            const currentLoopState = usePlaybackStore.getState().isLooping;
+            
+            // Restart playback from region start with new playback rate
+            // Always use full region boundaries for loop points
+            engine.play(activeSample.buffer, region.start, region.end, currentLoopState, newPlaybackRate);
+            
+            // Restore callback
+            engine.onPlaybackEnded = originalOnPlaybackEnded;
+            
+            // Update ref to track current enabled state
+            prevTimeStretchEnabledRef.current = timeStretchEnabled;
+            restartTimeoutRef.current = null;
+        }, 10); // Small delay to ensure stop() completes
+        
+        return () => {
+            if (restartTimeoutRef.current) {
+                clearTimeout(restartTimeoutRef.current);
+                restartTimeoutRef.current = null;
+            }
+        };
+    }, [timeStretchEnabled, isPlaying, activeSample, engine, region, timeStretchRatio]);
 
     // Sync stretch ratio to tempo when target tempo changes
     useEffect(() => {
@@ -329,6 +674,65 @@ export default function App() {
         }
     }, [recThreshold, engine]);
 
+    // Sync EQ parameters to AudioEngine (live updates)
+    useEffect(() => {
+        if (engine) {
+            engine.setEQ({
+                enabled: eqEnabled,
+                lowGain,
+                lowFreq,
+                midGain,
+                midFreq,
+                midQ,
+                highGain,
+                highFreq
+            });
+        }
+    }, [engine, eqEnabled, lowGain, lowFreq, midGain, midFreq, midQ, highGain, highFreq]);
+
+    // Loop is a global state - it affects what happens when playback reaches the end
+    // When loop is ON: playback will automatically restart at the end (respecting crop/region)
+    // When loop is OFF: playback will stop at the end
+    // We handle looping manually in onPlaybackEnded callback, so we don't use AudioBufferSourceNode's
+    // built-in loop property. This allows loop state to change during playback without restarting.
+
+    // Handle region changes during playback - restart playback with new region
+    const prevRegionRef = useRef<Region>({ start: region.start, end: region.end });
+    const isInitialMountRef = useRef(true);
+    
+    useEffect(() => {
+        // Skip on initial mount
+        if (isInitialMountRef.current) {
+            isInitialMountRef.current = false;
+            prevRegionRef.current = { start: region.start, end: region.end };
+            return;
+        }
+        
+        // Check if region actually changed
+        const regionChanged = prevRegionRef.current.start !== region.start || 
+                              prevRegionRef.current.end !== region.end;
+        
+        // Only restart if region actually changed and we're currently playing
+        if (regionChanged && engine && engine.activeSource && isPlaying && activeSample?.buffer && activeTab !== TabView.CHOP) {
+            // Restart playback with new region boundaries
+            // This is especially important for looping - loop boundaries need to be updated
+            engine.stop();
+            setPlaying(false);
+            // Restart with new region boundaries (loop will respect these new boundaries)
+            setTimeout(() => {
+                if (activeSample.buffer && !engine.activeSource) {
+                    const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
+                    engine.play(activeSample.buffer, region.start, region.end, isLooping, playbackRate);
+                    setPlaying(true);
+                }
+            }, 10);
+        }
+        
+        // Update ref for next comparison
+        prevRegionRef.current = { start: region.start, end: region.end };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [region.start, region.end]);
+
     const toggleRecord = () => {
         if (isRecording) {
             stopRecording();
@@ -341,12 +745,25 @@ export default function App() {
         if (!activeSample) return;
 
         if (isPlaying) {
-            setIsPlaying(false);
+            setPlaying(false);
             if (engine) engine.stop();
         } else {
-            setIsPlaying(true);
             if (engine && activeSample.buffer) {
-                engine.play(activeSample.buffer, region.start, region.end, false);
+                // Calculate playback rate based on time-stretch enabled state
+                const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
+                
+                // Use current loop state from store - respect user's loop preference
+                // If there's an active chop, play that; otherwise play the region
+                if (activeChopId && activeTab === TabView.CHOP) {
+                    const chop = chops.find(c => c.id === activeChopId);
+                    if (chop && activeSample.buffer) {
+                        engine.play(activeSample.buffer, chop.start, chop.end, isLooping, playbackRate);
+                        setPlaying(true);
+                    }
+                } else {
+                    engine.play(activeSample.buffer, region.start, region.end, isLooping, playbackRate);
+                    setPlaying(true);
+                }
             }
         }
     };
@@ -359,7 +776,7 @@ export default function App() {
                 newSelection.delete(id);
             } else {
                 newSelection.add(id);
-                setActiveSampleId(id);
+                setActiveSample(id);
             }
             setSelectedSampleIds(newSelection);
         } else if (multiSelectType === 'shift' && activeSampleId) {
@@ -375,11 +792,11 @@ export default function App() {
                     newSelection.add(samples[i].id);
                 }
                 setSelectedSampleIds(newSelection);
-                setActiveSampleId(id);
+                setActiveSample(id);
             }
         } else {
             setSelectedSampleIds(new Set([id]));
-            setActiveSampleId(id);
+            setActiveSample(id);
         }
     };
 
@@ -387,9 +804,9 @@ export default function App() {
         const newSamples = samples.filter(s => s.id !== id);
         setSamples(newSamples);
         if (activeSampleId === id && newSamples.length > 0) {
-            setActiveSampleId(newSamples[0].id);
+            setActiveSample(newSamples[0].id);
         } else if (activeSampleId === id) {
-            setActiveSampleId('');
+            setActiveSample('');
         }
     };
 
@@ -610,8 +1027,8 @@ export default function App() {
                         trimEnd: 1
                     };
                     setSamples(prev => [newSample, ...prev]);
-                    setActiveSampleId(newSample.id);
-                    setRegion({ start: 0, end: 1 });
+                    setActiveSample(newSample.id);
+                    setRegion(newSample.id, { start: 0, end: 1 });
                 }
             }
         });
@@ -648,7 +1065,7 @@ export default function App() {
                         trimEnd: 1
                     };
                     setSamples(prev => [newSample, ...prev]);
-                    setActiveSampleId(newSample.id);
+                    setActiveSample(newSample.id);
                 }
             }
         });
@@ -676,7 +1093,9 @@ export default function App() {
                 // next.start remains unchanged (it is the anchor)
             }
 
-            setChops(sortedChops);
+            if (activeSampleId) {
+                setChops(activeSampleId, sortedChops);
+            }
             setSamples(prev => prev.map(s =>
                 s.id === activeSampleId ? { ...s, chops: sortedChops } : s
             ));
@@ -704,37 +1123,115 @@ export default function App() {
         return chops;
     };
 
-    // Dynamic threshold adjustment with live preview
+    // Auto-detect BPM when auto chop is enabled (if not already detected)
     useEffect(() => {
-        if (activeSample && engine && activeTab === TabView.CHOP && thresholdChoppingEnabled && chopSubTab === 'threshold') {
-            const chopPoints = engine.detectTransients(activeSample.buffer!, chopThreshold);
-            const newChops = convertChopPointsToChops(chopPoints, activeSample.buffer!);
-            setChops(newChops);
-
-            // Update active sample with chops for sidebar display
-            setSamples(prev => prev.map(s =>
-                s.id === activeSampleId ? { ...s, chops: newChops } : s
-            ));
-
-            // Auto-expand sample in sidebar when chops are created
-            if (newChops.length > 0) {
-                setExpandedSamples(prev => new Set([...prev, activeSampleId]));
-            }
-
-            if (newChops.length > 0 && !activeChopId) {
-                setActiveChopId(newChops[0].id);
-            }
-        } else if (!thresholdChoppingEnabled && chopSubTab === 'threshold') {
-            setChops([]);
-            setSamples(prev => prev.map(s =>
-                s.id === activeSampleId ? { ...s, chops: undefined } : s
-            ));
+        if (activeSample && engine && activeTab === TabView.CHOP && autoChoppingEnabled && chopSubTab === 'auto' && !activeSample.detectedBPM) {
+            // Auto-detect BPM when auto chop is turned on
+            (async () => {
+                try {
+                    const bpmResult = await engine.detectBPM(activeSample.buffer!);
+                    if (bpmResult && (bpmResult.bpm || typeof bpmResult === 'number')) {
+                        // Handle both {bpm: number} and number return types
+                        const bpm = typeof bpmResult === 'number' ? bpmResult : bpmResult.bpm;
+                        setSamples(prev => prev.map(s =>
+                            s.id === activeSampleId ? { ...s, detectedBPM: bpm } : s
+                        ));
+                    }
+                } catch (error) {
+                    console.error('Auto BPM detection error:', error);
+                }
+            })();
         }
-    }, [chopThreshold, activeSample?.buffer, activeSample?.id, engine, activeTab, thresholdChoppingEnabled, chopSubTab]);
+    }, [autoChoppingEnabled, activeSample?.buffer, activeSample?.detectedBPM, activeSample?.id, engine, activeTab, chopSubTab, activeSampleId]);
+
+    // Dynamic auto chop with live preview
+    // Only runs when controls change (chopThreshold, bpmWeight) OR when enabling auto chop
+    // Does NOT run when switching samples - respects manual edits
+    useEffect(() => {
+        // Only proceed if auto chop is enabled and we're on the auto tab
+        if (!(activeSample && engine && activeTab === TabView.CHOP && autoChoppingEnabled && chopSubTab === 'auto')) {
+            // If auto chop is disabled, clear chops only if we're on auto tab
+            if (!autoChoppingEnabled && chopSubTab === 'auto') {
+                if (activeSampleId) {
+                    setChops(activeSampleId, []);
+                }
+                setSamples(prev => prev.map(s =>
+                    s.id === activeSampleId ? { ...s, chops: undefined } : s
+                ));
+            }
+            return;
+        }
+        
+        // Check if this sample has been manually edited - if so, don't auto-regenerate
+        if (activeSampleId && manuallyEditedChops.has(activeSampleId)) {
+            // Sample has been manually edited - don't overwrite
+            return;
+        }
+        
+        // Use async detection with BPM information
+        (async () => {
+            try {
+                const detectedBPM = activeSample.detectedBPM || null;
+                const bpmConfidence = activeSample.detectedBPM ? 0.8 : 0;
+                
+                const chopPoints = await engine.detectTransients(
+                    activeSample.buffer!, 
+                    chopThreshold,
+                    {
+                        detectedBPM,
+                        bpmConfidence,
+                        bpmWeight: bpmWeight !== null ? bpmWeight : undefined
+                    }
+                );
+                
+                const newChops = convertChopPointsToChops(chopPoints, activeSample.buffer!);
+                if (activeSampleId) {
+                    setChops(activeSampleId, newChops);
+                }
+
+                // Update active sample with chops for sidebar display
+                setSamples(prev => prev.map(s =>
+                    s.id === activeSampleId ? { ...s, chops: newChops } : s
+                ));
+
+                // Auto-expand sample in sidebar when chops are created
+                if (newChops.length > 0) {
+                    setExpandedSamples(prev => new Set([...prev, activeSampleId]));
+                }
+
+                if (newChops.length > 0 && !activeChopId && activeSampleId) {
+                    setActiveChopId(activeSampleId, newChops[0].id);
+                }
+            } catch (error) {
+                console.error('Error detecting transients:', error);
+            }
+        })();
+    }, [chopThreshold, bpmWeight, autoChoppingEnabled, chopSubTab, activeTab, engine, activeSample?.buffer, activeSample?.detectedBPM, activeSampleId, activeChopId, manuallyEditedChops]);
+    
+    // Clear manual edit flag when auto chop controls change (allows regeneration)
+    useEffect(() => {
+        if (activeSampleId && autoChoppingEnabled && chopSubTab === 'auto') {
+            // When controls change, clear the manual edit flag so auto chop can regenerate
+            setManuallyEditedChops(prev => {
+                const updated = new Set(prev);
+                updated.delete(activeSampleId);
+                return updated;
+            });
+        }
+    }, [chopThreshold, bpmWeight, activeSampleId, autoChoppingEnabled, chopSubTab]);
 
     // Dynamic equal chopping with live preview
     useEffect(() => {
         if (activeSample && engine && activeTab === TabView.CHOP && chopSubTab === 'equal' && chopSliceCount > 1) {
+            // Clear manual edit flag when switching to equal chop (user is regenerating chops)
+            if (activeSampleId) {
+                setManuallyEditedChops(prev => {
+                    const updated = new Set(prev);
+                    updated.delete(activeSampleId);
+                    return updated;
+                });
+            }
+            
             // Create equal divisions as Chop objects
             const newChops: Chop[] = [];
             const bufferLength = activeSample.buffer!.length;
@@ -753,7 +1250,9 @@ export default function App() {
                 });
             }
 
-            setChops(newChops);
+            if (activeSampleId) {
+                setChops(activeSampleId, newChops);
+            }
             setSamples(prev => prev.map(s =>
                 s.id === activeSampleId ? { ...s, chops: newChops } : s
             ));
@@ -763,11 +1262,13 @@ export default function App() {
                 setExpandedSamples(prev => new Set([...prev, activeSampleId]));
             }
 
-            if (newChops.length > 0 && !activeChopId) {
-                setActiveChopId(newChops[0].id);
+            if (newChops.length > 0 && !activeChopId && activeSampleId) {
+                setActiveChopId(activeSampleId, newChops[0].id);
             }
         } else if (chopSubTab === 'equal' && chopSliceCount <= 1) {
-            setChops([]);
+            if (activeSampleId) {
+                setChops(activeSampleId, []);
+            }
             setSamples(prev => prev.map(s =>
                 s.id === activeSampleId ? { ...s, chops: undefined } : s
             ));
@@ -790,10 +1291,13 @@ export default function App() {
             if (note !== undefined) {
                 const chop = chops.find(c => c.keyboardNote === note);
                 if (chop && activeSample.buffer) {
-                    setActiveChopId(chop.id);
+                    if (activeSampleId) {
+                        setActiveChopId(activeSampleId, chop.id);
+                    }
                     // Play chop with pitch shifting if needed
                     const pitchShift = Math.pow(2, (note - 60) / 12); // C4 = 60 is base
-                    engine.play(activeSample.buffer, chop.start, chop.end, false);
+                    const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
+                    engine.play(activeSample.buffer, chop.start, chop.end, false, playbackRate);
                     // Note: pitch shifting would require modifying play() method
                 }
             }
@@ -830,7 +1334,7 @@ export default function App() {
                         const chop = chops.find(c => c.id === activeChopId);
                         if (chop && activeSample.buffer) {
                             // Resume from slice start
-                            setIsPlaying(true);
+                            setPlaying(true);
 
                             // Overwrite future: Remove chops after this point
                             // Keep points <= chop.start
@@ -868,7 +1372,9 @@ export default function App() {
                                 });
                             }
 
-                            setChops(newChops);
+                            if (activeSampleId) {
+                                setChops(activeSampleId, newChops);
+                            }
                             setSamples(prev => prev.map(s =>
                                 s.id === activeSampleId ? { ...s, chops: newChops } : s
                             ));
@@ -880,7 +1386,7 @@ export default function App() {
                     }
 
                     // Default Start
-                    setIsPlaying(true);
+                    setPlaying(true);
                     engine.play(activeSample.buffer!, 0, 1, false);
                 } else {
                     // Add chop point
@@ -920,7 +1426,9 @@ export default function App() {
                             });
                         }
 
-                        setChops(newChops);
+                        if (activeSampleId) {
+                            setChops(activeSampleId, newChops);
+                        }
                         setSamples(prev => prev.map(s =>
                             s.id === activeSampleId ? { ...s, chops: newChops } : s
                         ));
@@ -932,7 +1440,9 @@ export default function App() {
                             // or just select the one we are currently "in".
                             // Usually the one starting at 'position'.
                             const newChop = newChops.find(c => Math.abs(c.start - position) < 0.0001);
-                            if (newChop) setActiveChopId(newChop.id);
+                            if (newChop && activeSampleId) {
+                                setActiveChopId(activeSampleId, newChop.id);
+                            }
                         }
                     }
                 }
@@ -942,22 +1452,23 @@ export default function App() {
             // 3. Standard Playback
             if (activeSample && engine) {
                 if (isPlaying) {
-                    setIsPlaying(false);
+                    setPlaying(false);
                     engine.stop();
                 } else {
                     // Play Selection if Active (Consumer requirement #2)
+                    const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
                     if (activeChopId && !manualChoppingEnabled) {
                         const chop = chops.find(c => c.id === activeChopId);
                         if (chop && activeSample.buffer) {
-                            setIsPlaying(true);
-                            engine.play(activeSample.buffer, chop.start, chop.end, false);
+                            setPlaying(true);
+                            engine.play(activeSample.buffer, chop.start, chop.end, isLooping, playbackRate);
                             return;
                         }
                     }
 
                     // Fallback: Play full sample region
-                    setIsPlaying(true);
-                    engine.play(activeSample.buffer!, region.start, region.end, false);
+                    setPlaying(true);
+                    engine.play(activeSample.buffer!, region.start, region.end, isLooping, playbackRate);
                 }
             }
 
@@ -967,34 +1478,245 @@ export default function App() {
         return () => window.removeEventListener('keydown', handleSpacebar);
     }, [manualChoppingEnabled, engine, activeSample, isPlaying, activeTab, chopSubTab, activeSampleId, manualChopPoints, region, activeChopId, chops]);
 
+    // Sync store with AudioEngine and handle sample changes
+    useEffect(() => {
+        if (engine) {
+            usePlaybackStore.getState().syncWithEngine(engine);
+        }
+    }, [engine, isPlaying, isLooping]);
+    
     // Reset Chop State on Sample Change
     useEffect(() => {
-        // Stop playback when switching samples (Consumer requirement #5)
+        // Stop playback and preview when switching samples (Consumer requirement #5)
         if (isPlaying) {
-            setIsPlaying(false);
+            setPlaying(false);
             if (engine) engine.stop();
         }
+        
+        // Stop any active preview
+        // Stop any time-stretch preview if active (legacy cleanup)
+        if (isPreviewingStretch) {
+            setPreviewingStretch(false);
+        }
 
-        if (activeSample) {
-            setChops(activeSample.chops || []);
-            setActiveChopId(null);
+        if (activeSample && activeSampleId) {
+            // Load chops from sample or store
+            const sampleChops = activeSample.chops || getSampleChops(activeSampleId);
+            setChops(activeSampleId, sampleChops);
+            setActiveChopId(activeSampleId, null);
             // Optional: Reset manual mode to avoid confusion?
             // The user report says "chop mode overlay doesnt disable", suggesting they expect it to clear.
             setManualChopPoints([]);
             // We usually want to keep the mode enabled if they are slicing multiple things, 
             // but we MUST clear the points so the old lines don't show up.
         }
-    }, [activeSampleId, engine]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeSampleId, engine]); // Don't include isPlaying/isPreviewingStretch - they would cause infinite loops
+
+    // Note: Effects are reset explicitly when:
+    // 1. Applying effects to create a new sample (in applyEffectsAndResample handler)
+    // 2. Time stretching to create a new sample (in time stretch handler)
+    // We don't automatically reset when switching samples to avoid breaking playback
+    // when creating new samples via crop/normalize/etc.
+
+    // Check if there are pending changes (region or effects)
+    const hasPendingChanges = () => {
+        // Check if region is modified (not full sample)
+        const regionModified = region.start !== 0 || region.end !== 1;
+        
+        // Check if EQ is enabled with non-zero gains
+        const eqActive = eqEnabled && (lowGain !== 0 || midGain !== 0 || highGain !== 0);
+        
+        // Note: delay/reverb mix values aren't directly accessible, but they're reset when switching samples
+        // So we mainly check region and EQ
+        
+        return regionModified || eqActive;
+    };
+
+    // Check if there's a pending crop (region adjustment)
+    const hasPendingCrop = () => {
+        return region.start !== 0 || region.end !== 1;
+    };
+
+    // Helper function to apply time stretch (with optional crop)
+    const applyTimeStretch = async (applyCrop: boolean = false) => {
+        if (!activeSample?.buffer || !engine) {
+            console.error('Cannot time stretch: missing buffer or engine');
+            alert('Cannot time stretch: Please select a sample with audio data');
+            return;
+        }
+        
+        // Capture all needed data before async operations
+        const currentSampleId = activeSample.id;
+        let sourceBuffer = activeSample.buffer;
+        const currentName = activeSample.name;
+        const currentBpm = activeSample.bpm;
+        const currentTags = [...activeSample.tags];
+        
+        // Apply crop first if requested
+        if (applyCrop) {
+            const tempSampleStub = {
+                buffer: sourceBuffer,
+                trimStart: region.start,
+                trimEnd: region.end
+            };
+            const croppedBuffer = await engine.crop(tempSampleStub);
+            if (croppedBuffer) {
+                sourceBuffer = croppedBuffer;
+                // Reset region after crop is applied
+                if (activeSampleId) {
+                    setRegion(activeSampleId, { start: 0, end: 1 });
+                }
+            }
+        }
+        
+        console.log('Starting time stretch...', { 
+            sampleId: currentSampleId,
+            ratio: timeStretchRatio,
+            bufferLength: sourceBuffer.length,
+            sampleRate: sourceBuffer.sampleRate,
+            applyCrop
+        });
+        
+        setTimeStretchProgress(0);
+        setSamples(prevSamples => 
+            prevSamples.map(s => 
+                s.id === currentSampleId ? { ...s, isTimeStretching: true } : s
+            )
+        );
+        
+        try {
+            // Detect BPM before stretching
+            let originalBPM: number | null = null;
+            try {
+                const bpmResult = await engine.detectBPM(sourceBuffer);
+                if (bpmResult && bpmResult.bpm) {
+                    originalBPM = bpmResult.bpm;
+                    console.log('Detected BPM before stretching:', originalBPM);
+                }
+            } catch (bpmError) {
+                console.warn('BPM detection failed, continuing without BPM update:', bpmError);
+            }
+            
+            // Calculate new BPM based on stretch ratio
+            const newBPM = originalBPM ? originalBPM * timeStretchRatio : currentBpm;
+            
+            const stretched = await engine.timeStretch(
+                sourceBuffer,
+                timeStretchRatio,
+                (progress) => {
+                    setTimeStretchProgress(progress);
+                }
+            );
+            
+            if (!stretched || !stretched.length) {
+                throw new Error('Time stretch returned invalid buffer');
+            }
+            
+            console.log('Time stretch completed successfully', {
+                originalLength: sourceBuffer.length,
+                stretchedLength: stretched.length,
+                originalDuration: sourceBuffer.duration,
+                stretchedDuration: stretched.duration,
+                originalBPM,
+                newBPM
+            });
+            
+            const blob = audioBufferToWav(stretched);
+            const originalName = currentName.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+            const extension = currentName.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
+            const suffix = applyCrop ? '_Cropped_Stretched' : '_Stretched';
+            const newName = `${originalName}${suffix}_${timeStretchRatio.toFixed(2)}x.${extension}`;
+            
+            const newSample: Sample = {
+                id: Date.now().toString(),
+                name: newName,
+                duration: formatDuration(stretched.duration),
+                bpm: typeof newBPM === 'number' ? Math.round(newBPM) : newBPM,
+                size: `${(blob.size / 1024 / 1024).toFixed(2)} MB`,
+                waveform: [],
+                tags: [...currentTags, 'Time Stretched', ...(applyCrop ? ['Cropped'] : [])],
+                buffer: stretched,
+                blob: blob,
+                trimStart: 0,
+                trimEnd: 1,
+                detectedBPM: typeof newBPM === 'number' ? newBPM : undefined
+            };
+            
+            // Use functional updates to ensure we have the latest state
+            setSamples(prevSamples => {
+                // First, clear the isTimeStretching flag from the original sample
+                const updatedSamples = prevSamples.map(s => 
+                    s.id === currentSampleId ? { ...s, isTimeStretching: false } : s
+                );
+                // Then add the new sample at the beginning
+                return [newSample, ...updatedSamples];
+            });
+            
+            // Set the new sample as active
+            console.log('Setting new sample as active:', newSample.id, newSample.name);
+            setActiveSample(newSample.id);
+            
+            // Reset all effects and preview state when time stretching creates a new sample
+            // This prevents double application when the new stretched sample is played
+            const store = usePlaybackStore.getState();
+            if (engine) {
+                engine.setDelay(0.3, 0.3, 0);
+                engine.setReverb(0.5, 0.5, 0);
+            }
+            store.resetEffects();
+            prevStretchRatioRef.current = 1.0;
+        } catch (error) {
+            console.error('Time stretch error:', error);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            console.error('Error details:', { error, errorMessage, stack: error instanceof Error ? error.stack : undefined });
+            alert(`Time stretch failed: ${errorMessage}\n\nCheck the console for more details.`);
+            
+            // Clear the isTimeStretching flag on error and preserve active sample
+            setSamples(prevSamples => 
+                prevSamples.map(s => 
+                    s.id === currentSampleId ? { ...s, isTimeStretching: false } : s
+                )
+            );
+            // Make sure we don't deselect the sample on error
+            setActiveSample(currentSampleId);
+        } finally {
+            setTimeStretchProgress(0);
+        }
+    };
 
     // Chopping handlers
-    const handleCreateChopSamples = async () => {
+    const handleCreateChopSamples = async (applyProcessing: boolean = false) => {
         if (!activeSample || !engine || chops.length === 0) return;
+
+        // If applying processing, first process the sample with current settings
+        let sourceBuffer = activeSample.buffer!;
+        if (applyProcessing) {
+            // Apply region crop if region is modified
+            if (region.start !== 0 || region.end !== 1) {
+                const tempSampleStub = {
+                    buffer: sourceBuffer,
+                    trimStart: region.start,
+                    trimEnd: region.end
+                };
+                sourceBuffer = await engine.crop(tempSampleStub) || sourceBuffer;
+                // Reset region after crop is applied
+                if (activeSampleId) {
+                    setRegion(activeSampleId, { start: 0, end: 1 });
+                }
+            }
+            
+            // Apply EQ if enabled
+            if (eqEnabled && (lowGain !== 0 || midGain !== 0 || highGain !== 0)) {
+                sourceBuffer = await engine.applyEffectsAndResample(sourceBuffer) || sourceBuffer;
+            }
+        }
 
         const newSamples: Sample[] = [];
         for (let i = 0; i < chops.length; i++) {
             const chop = chops[i];
             const tempSampleStub = {
-                buffer: activeSample.buffer!,
+                buffer: sourceBuffer,
                 trimStart: chop.start,
                 trimEnd: chop.end
             };
@@ -1022,21 +1744,34 @@ export default function App() {
         }
 
         setSamples(prev => [...newSamples, ...prev]);
-        setChops([]); // Clear chops after creating samples
-        setActiveChopId(null);
+        if (activeSampleId) {
+            setChops(activeSampleId, []); // Clear chops after creating samples
+            setActiveChopId(activeSampleId, null);
+        }
+        
+        // Reset effects if processing was applied
+        if (applyProcessing) {
+            if (engine) {
+                engine.setDelay(0.3, 0.3, 0);
+                engine.setReverb(0.5, 0.5, 0);
+            }
+            usePlaybackStore.getState().resetEffects();
+        }
     };
 
 
     const handleClearChops = () => {
         // Clear all chops
-        setChops([]);
-        setActiveChopId(null);
+        if (activeSampleId) {
+            setChops(activeSampleId, []);
+            setActiveChopId(activeSampleId, null);
+        }
 
         // Clear chops from all samples in the tree
         setSamples(prev => prev.map(s => ({ ...s, chops: undefined })));
 
         // Turn off all chop modes
-        setThresholdChoppingEnabled(false);
+        setAutoChoppingEnabled(false);
         setManualChoppingEnabled(false);
         setManualChopPoints([]);
 
@@ -1094,14 +1829,32 @@ export default function App() {
     const handleProcessSlices = async () => {
         if (!activeSample || !engine || chops.length === 0) return;
 
-        setProcessingDialog({
-            isOpen: true,
-            type: 'chop',
-            onConfirm: async () => {
-                setProcessingDialog(null);
-                await handleCreateChopSamples();
-            }
-        });
+        // Check if there are pending changes (region or effects)
+        if (hasPendingChanges()) {
+            // Show dialog asking if user wants to apply processing
+            setProcessingDialog({
+                isOpen: true,
+                type: 'chop-with-processing',
+                onConfirm: async () => {
+                    setProcessingDialog(null);
+                    await handleCreateChopSamples(false); // Chop only
+                },
+                onApplyAndChop: async () => {
+                    setProcessingDialog(null);
+                    await handleCreateChopSamples(true); // Apply processing then chop
+                }
+            });
+        } else {
+            // No pending changes, just chop normally
+            setProcessingDialog({
+                isOpen: true,
+                type: 'chop',
+                onConfirm: async () => {
+                    setProcessingDialog(null);
+                    await handleCreateChopSamples(false);
+                }
+            });
+        }
     };
 
     // Clear chops when switching chop modes
@@ -1128,11 +1881,15 @@ export default function App() {
                     </div>
                     <button
                         onClick={() => {
-                            setActiveSampleId('');
-                            setRegion({ start: 0, end: 1 });
-                            setIsPlaying(false);
+                            setActiveSample('');
+                            if (activeSampleId) {
+                                setRegion(activeSampleId, { start: 0, end: 1 });
+                            }
+                            setPlaying(false);
                             if (engine) engine.stop();
-                            setActiveChopId(null);
+                            if (activeSampleId) {
+                                setActiveChopId(activeSampleId, null);
+                            }
                         }}
                         className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[10px] font-bold tracking-wide uppercase border border-zinc-700 hover:border-indigo-500/50 transition-all"
                         title="Clear workspace for new sample"
@@ -1219,7 +1976,7 @@ export default function App() {
                             onClick={() => {
                                 if (isRecording) stopRecording();
                                 if (engine) engine.stop();
-                                setIsPlaying(false);
+                                setPlaying(false);
                             }}
                             className="p-2.5 rounded-full hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
                             title="Stop Recording/Playback"
@@ -1231,7 +1988,7 @@ export default function App() {
                             onClick={() => {
                                 if (isRecording) stopRecording();
                                 if (engine) engine.stop();
-                                setIsPlaying(false);
+                                setPlaying(false);
                             }}
                             className="p-2.5 rounded-full hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
                             title="Stop Recording/Playback"
@@ -1241,12 +1998,108 @@ export default function App() {
 
                         <button
                             onClick={handlePlayToggle}
+                            title={isPlaying ? "Pause Playback" : "Play Sample"}
+                            aria-label={isPlaying ? "Pause Playback" : "Play Sample"}
                             className={`w-12 h-12 rounded-full flex items-center justify-center transition-all border ${isPlaying
                                 ? 'bg-indigo-500 border-indigo-500 text-white shadow-[0_0_20px_rgba(99,102,241,0.4)]'
                                 : 'bg-zinc-800 border-zinc-700 text-zinc-200 hover:bg-zinc-700 hover:border-zinc-600 hover:text-white'
                                 }`}
                         >
                             {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current ml-1" />}
+                        </button>
+
+                        <button
+                            onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                const newLoopState = !isLooping;
+                                
+                                // Update the engine's loop state immediately (vanilla JS - maintains portability)
+                                if (engine) {
+                                    engine.isLooping = newLoopState;
+                                }
+                                
+                                // Update the Zustand store
+                                setLooping(newLoopState);
+                                
+                                // If loop is being turned OFF during active playback, we need to stop and restart
+                                // without looping. This is because AudioBufferSourceNode's loop property can't be
+                                // changed after starting - a looping source will loop forever until stopped.
+                                if (isPlaying && !newLoopState && engine && activeSample?.buffer && engine.activeSource) {
+                                    // Calculate current playback position
+                                    const elapsed = engine.context.currentTime - engine.playbackStartTime;
+                                    const playbackRate = engine.currentPlaybackRate || 1.0;
+                                    const bufferTimeElapsed = elapsed * playbackRate;
+                                    
+                                    // Determine what we're playing (chop or region)
+                                    let startPct = region.start;
+                                    let endPct = region.end;
+                                    
+                                    if (activeChopId && activeTab === TabView.CHOP) {
+                                        const chop = chops.find(c => c.id === activeChopId);
+                                        if (chop) {
+                                            startPct = chop.start;
+                                            endPct = chop.end;
+                                        }
+                                    }
+                                    
+                                    const duration = activeSample.buffer.duration;
+                                    const regionStart = startPct * duration;
+                                    const regionEnd = endPct * duration;
+                                    const regionDuration = regionEnd - regionStart;
+                                    
+                                    // Calculate current position within the region (accounting for looping)
+                                    let currentPositionInRegion = (bufferTimeElapsed % regionDuration);
+                                    const currentBufferPosition = regionStart + currentPositionInRegion;
+                                    const currentPositionPct = currentBufferPosition / duration;
+                                    
+                                    // Stop current playback with fade-out to prevent crackling
+                                    engine.stop(true); // Use fade-out
+                                    
+                                    // Restart from current position without looping
+                                    setTimeout(() => {
+                                        if (engine && activeSample?.buffer && !engine.activeSource) {
+                                            // Clamp position to region bounds
+                                            const clampedPosition = Math.max(startPct, Math.min(currentPositionPct, endPct));
+                                            
+                                            // Store the current time before calling play()
+                                            const restartTime = engine.context.currentTime;
+                                            
+                                            if (activeChopId && activeTab === TabView.CHOP) {
+                                                const chop = chops.find(c => c.id === activeChopId);
+                                                if (chop && activeSample.buffer) {
+                                                    engine.play(activeSample.buffer, clampedPosition, chop.end, false);
+                                                    
+                                                    // Adjust playbackStartTime so playhead continues smoothly
+                                                    // Calculate how much buffer time we've already played
+                                                    const positionOffset = (clampedPosition - startPct) * duration;
+                                                    const realTimeOffset = positionOffset / playbackRate;
+                                                    engine.playbackStartTime = restartTime - realTimeOffset;
+                                                    
+                                                    setPlaying(true);
+                                                }
+                                            } else {
+                                                engine.play(activeSample.buffer, clampedPosition, region.end, false);
+                                                
+                                                // Adjust playbackStartTime so playhead continues smoothly
+                                                const positionOffset = (clampedPosition - startPct) * duration;
+                                                const realTimeOffset = positionOffset / playbackRate;
+                                                engine.playbackStartTime = restartTime - realTimeOffset;
+                                                
+                                                setPlaying(true);
+                                            }
+                                        }
+                                    }, 10);
+                                }
+                            }}
+                            title={isLooping ? "Disable Loop" : "Enable Loop"}
+                            aria-label={isLooping ? "Disable Loop" : "Enable Loop"}
+                            className={`w-12 h-12 rounded-full flex items-center justify-center transition-all border ml-1 ${isLooping
+                                ? 'bg-green-600 border-green-500 text-white shadow-[0_0_15px_rgba(34,197,94,0.4)]'
+                                : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:border-zinc-600 hover:text-green-400'
+                                }`}
+                        >
+                            <Repeat className="w-5 h-5" />
                         </button>
 
                         <button
@@ -1297,8 +2150,8 @@ export default function App() {
                     onShare={handleShare}
                     onSelectChop={(sampleId, chopId) => {
                         handleSelectSample(sampleId);
-                        setActiveSampleId(sampleId);
-                        setActiveChopId(chopId);
+                        setActiveSample(sampleId);
+                        setActiveChopId(sampleId, chopId);
                         const chop = chops.find(c => c.id === chopId);
                         if (chop && engine && activeSample?.buffer) {
                             engine.playSnippet(activeSample.buffer, chop.start, 0.2);
@@ -1319,7 +2172,7 @@ export default function App() {
                 />
 
                 {/* CENTER: Work Area - Must be able to grow */}
-                <main className="flex-1 flex flex-col bg-zinc-950/50 min-w-[400px] min-h-0 overflow-hidden">
+                <main className="flex-1 flex flex-col bg-zinc-950/50 min-w-0 min-h-0 overflow-hidden">
                     {/* Waveform - Dynamic height based on split ratio */}
                     <div
                         className="flex flex-col bg-zinc-900/50 border-b border-zinc-800 relative min-h-0 overflow-hidden"
@@ -1358,22 +2211,34 @@ export default function App() {
                                     <WaveformDisplay
                                         sample={activeSample}
                                         region={region}
-                                        onRegionChange={setRegion}
+                                        onRegionChange={(newRegion) => {
+                                            if (activeSampleId) {
+                                                setRegion(activeSampleId, newRegion);
+                                            }
+                                        }}
                                         isPlaying={isPlaying}
                                         isRecording={isRecording}
                                         chops={activeTab === TabView.CHOP ? chops : []}
                                         activeChopId={activeChopId}
                                         chopsLinked={chopsLinked}
                                         previewMode={activeTab === TabView.CHOP}
+                                        isLooping={isLooping}
                                         onChopClick={(chopId) => {
-                                            setActiveChopId(chopId);
+                                            if (activeSampleId) {
+                                                setActiveChopId(activeSampleId, chopId);
+                                            }
                                             const chop = chops.find(c => c.id === chopId);
                                             if (chop && engine && activeSample?.buffer) {
-                                                engine.play(activeSample.buffer, chop.start, chop.end, false);
+                                                const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
+                                                engine.play(activeSample.buffer, chop.start, chop.end, false, playbackRate);
                                             }
                                         }}
                                         onChopUpdate={(updatedChops) => {
-                                            setChops(updatedChops);
+                                            if (activeSampleId) {
+                                                setChops(activeSampleId, updatedChops);
+                                                // Mark this sample as manually edited to prevent auto chop from overwriting
+                                                setManuallyEditedChops(prev => new Set(prev).add(activeSampleId));
+                                            }
                                             setSamples(prev => prev.map(s =>
                                                 s.id === activeSampleId ? { ...s, chops: updatedChops } : s
                                             ));
@@ -1424,55 +2289,41 @@ export default function App() {
                         className="bg-zinc-900 border-t border-zinc-800 flex flex-col shrink-0 overflow-hidden min-h-[300px]"
                         style={{ height: `${(1 - splitRatio) * 100}%` }}
                     >
-                        <div className="flex border-b border-zinc-800 bg-zinc-950 shrink-0 relative">
-                            {/* Edit Toggle - Top Right */}
-                            <div className="absolute top-0 right-0 h-full flex items-center px-4 gap-2 z-10">
-                                <span className="text-[9px] text-zinc-500 uppercase font-bold tracking-wider">Edit:</span>
-                                <button
-                                    onClick={() => setEditMode(editMode === 'individual' ? 'all' : 'individual')}
-                                    className={`px-3 py-1.5 rounded text-[10px] font-bold tracking-wide transition-all border ${editMode === 'individual'
-                                        ? 'bg-indigo-600 text-white border-indigo-500'
-                                        : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:bg-zinc-700'
-                                        }`}
-                                    title={editMode === 'individual' ? 'Currently editing individual sample' : 'Currently editing all samples'}
-                                >
-                                    {editMode === 'individual' ? 'Individual' : 'All'}
-                                </button>
-                            </div>
+                        <div className="flex border-b border-zinc-800 bg-zinc-950 shrink-0">
                             <button
                                 onClick={() => setActiveTab(TabView.MAIN)}
-                                className={`px-6 py-3 text-xs font-bold tracking-wide transition-colors border-r border-zinc-800 ${activeTab === TabView.MAIN ? 'text-white bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+                                className={`px-3 py-2.5 text-[10px] font-bold tracking-normal whitespace-nowrap transition-colors border-r border-zinc-800 flex-1 min-w-0 ${activeTab === TabView.MAIN ? 'text-white bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
                                     }`}
                             >
                                 INFO
                             </button>
                             <button
                                 onClick={() => setActiveTab(TabView.CHOP)}
-                                className={`px-6 py-3 text-xs font-bold tracking-wide transition-colors border-r border-zinc-800 flex items-center gap-2 ${activeTab === TabView.CHOP ? 'text-white bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+                                className={`px-3 py-2.5 text-[10px] font-bold tracking-normal whitespace-nowrap transition-colors border-r border-zinc-800 flex items-center justify-center gap-1.5 flex-1 min-w-0 ${activeTab === TabView.CHOP ? 'text-white bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
                                     }`}
                             >
-                                <Scissors className="w-3 h-3" /> CHOP
+                                <Scissors className="w-2.5 h-2.5 shrink-0" /> <span>CHOP</span>
                             </button>
                             <button
                                 onClick={() => setActiveTab(TabView.EQ)}
-                                className={`px-6 py-3 text-xs font-bold tracking-wide transition-colors border-r border-zinc-800 flex items-center gap-2 ${activeTab === TabView.EQ ? 'text-white bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+                                className={`px-3 py-2.5 text-[10px] font-bold tracking-normal whitespace-nowrap transition-colors border-r border-zinc-800 flex items-center justify-center gap-1.5 flex-1 min-w-0 ${activeTab === TabView.EQ ? 'text-white bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
                                     }`}
                             >
-                                <Sliders className="w-3 h-3" /> EQ & FX
+                                <Sliders className="w-2.5 h-2.5 shrink-0" /> <span>EQ & FX</span>
                             </button>
                             <button
                                 onClick={() => setActiveTab(TabView.TIME_STRETCH)}
-                                className={`px-6 py-3 text-xs font-bold tracking-wide transition-colors border-r border-zinc-800 flex items-center gap-2 ${activeTab === TabView.TIME_STRETCH ? 'text-indigo-400 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+                                className={`px-3 py-2.5 text-[10px] font-bold tracking-normal whitespace-nowrap transition-colors border-r border-zinc-800 flex items-center justify-center gap-1.5 flex-1 min-w-0 ${activeTab === TabView.TIME_STRETCH ? 'text-indigo-400 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
                                     }`}
                             >
-                                <Gauge className="w-3 h-3" /> TIME STRETCH
+                                <Gauge className="w-2.5 h-2.5 shrink-0" /> <span className="truncate">TIME STRETCH</span>
                             </button>
                             <button
                                 onClick={() => setActiveTab(TabView.STEM_SEPARATION)}
-                                className={`px-6 py-3 text-xs font-bold tracking-wide transition-colors flex items-center gap-2 ${activeTab === TabView.STEM_SEPARATION ? 'text-indigo-400 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+                                className={`px-3 py-2.5 text-[10px] font-bold tracking-normal whitespace-nowrap transition-colors flex items-center justify-center gap-1.5 flex-1 min-w-0 ${activeTab === TabView.STEM_SEPARATION ? 'text-indigo-400 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
                                     }`}
                             >
-                                <Split className="w-3 h-3" /> STEM SEPARATION
+                                <Split className="w-2.5 h-2.5 shrink-0" /> <span className="truncate">STEM SEPARATION</span>
                             </button>
                         </div>
 
@@ -1537,10 +2388,48 @@ export default function App() {
                                             </div>
                                             <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
                                                 <span className="text-zinc-500 shrink-0">BPM</span>
-                                                <div className="flex items-center gap-2 min-w-0">
+                                                <div className="flex items-center gap-1.5 min-w-0">
                                                     <span className="text-zinc-200 font-mono text-xs">
                                                         {activeSample.detectedBPM || activeSample.bpm || '—'}
                                                     </span>
+                                                    {(activeSample.detectedBPM || activeSample.bpm) && (
+                                                        <div className="flex items-center gap-0.5 shrink-0">
+                                                            <button
+                                                                onClick={() => {
+                                                                    const bpmValue = activeSample.detectedBPM || (typeof activeSample.bpm === 'number' ? activeSample.bpm : Number(activeSample.bpm)) || 0;
+                                                                    if (bpmValue > 0) {
+                                                                        const newBPM = bpmValue * 2;
+                                                                        setSamples(prev => prev.map(s =>
+                                                                            s.id === activeSampleId 
+                                                                                ? { ...s, detectedBPM: newBPM, bpm: newBPM }
+                                                                                : s
+                                                                        ));
+                                                                    }
+                                                                }}
+                                                                className="px-1.5 py-0.5 text-[9px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-colors"
+                                                                title="Double BPM (x2)"
+                                                            >
+                                                                x2
+                                                            </button>
+                                                            <button
+                                                                onClick={() => {
+                                                                    const bpmValue = activeSample.detectedBPM || (typeof activeSample.bpm === 'number' ? activeSample.bpm : Number(activeSample.bpm)) || 0;
+                                                                    if (bpmValue > 0) {
+                                                                        const newBPM = Math.round(bpmValue / 2);
+                                                                        setSamples(prev => prev.map(s =>
+                                                                            s.id === activeSampleId 
+                                                                                ? { ...s, detectedBPM: newBPM, bpm: newBPM }
+                                                                                : s
+                                                                        ));
+                                                                    }
+                                                                }}
+                                                                className="px-1.5 py-0.5 text-[9px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-colors"
+                                                                title="Half BPM (/2)"
+                                                            >
+                                                                /2
+                                                            </button>
+                                                        </div>
+                                                    )}
                                                     {activeSample.detectedBPM && activeSample.bpm && activeSample.detectedBPM !== activeSample.bpm && (
                                                         <span className="text-zinc-500 text-[10px] shrink-0">(detected: {activeSample.detectedBPM})</span>
                                                     )}
@@ -1603,15 +2492,15 @@ export default function App() {
                                     <div className="flex border-b border-zinc-800 bg-zinc-950/50 shrink-0">
                                         <button
                                             onClick={() => {
-                                                if (chopSubTab !== 'threshold') {
+                                                if (chopSubTab !== 'auto') {
                                                     handleClearChops();
                                                 }
-                                                setChopSubTab('threshold');
+                                                setChopSubTab('auto');
                                             }}
-                                            className={`px-6 py-3 text-sm font-bold tracking-wide transition-colors border-r border-zinc-800 ${chopSubTab === 'threshold' ? 'text-white bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+                                            className={`px-6 py-3 text-sm font-bold tracking-wide transition-colors border-r border-zinc-800 ${chopSubTab === 'auto' ? 'text-white bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
                                                 }`}
                                         >
-                                            Threshold
+                                            Auto
                                         </button>
                                         <button
                                             onClick={() => {
@@ -1641,11 +2530,11 @@ export default function App() {
 
                                     {/* Content based on sub-tab */}
                                     <div className="flex-1 overflow-hidden">
-                                        {chopSubTab === 'threshold' && (
+                                        {chopSubTab === 'auto' && (
                                             <div className="h-full p-4 flex flex-col overflow-hidden relative">
                                                 <div className="flex items-center justify-between mb-4 shrink-0">
                                                     <div>
-                                                        <h4 className="text-zinc-200 text-base font-bold mb-1">Threshold-Based Chopping</h4>
+                                                        <h4 className="text-zinc-200 text-base font-bold mb-1">Auto Chop</h4>
                                                         <p className="text-xs text-zinc-400">Detect transients and create chops automatically</p>
                                                     </div>
                                                     <div className="flex items-center gap-2">
@@ -1676,23 +2565,23 @@ export default function App() {
                                                         )}
                                                         <button
                                                             onClick={() => {
-                                                                if (thresholdChoppingEnabled) {
+                                                                if (autoChoppingEnabled) {
                                                                     // Turning off - clear chops
                                                                     handleClearChops();
                                                                 }
-                                                                setThresholdChoppingEnabled(!thresholdChoppingEnabled);
+                                                                setAutoChoppingEnabled(!autoChoppingEnabled);
                                                             }}
-                                                            className={`px-4 py-2 rounded text-xs font-bold transition-all shrink-0 ${thresholdChoppingEnabled
+                                                            className={`px-4 py-2 rounded text-xs font-bold transition-all shrink-0 ${autoChoppingEnabled
                                                                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30'
                                                                 : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
                                                                 }`}
                                                         >
-                                                            {thresholdChoppingEnabled ? 'ON' : 'OFF'}
+                                                            {autoChoppingEnabled ? 'ON' : 'OFF'}
                                                         </button>
                                                     </div>
                                                 </div>
 
-                                                {thresholdChoppingEnabled && (
+                                                {autoChoppingEnabled && (
                                                     <div className="flex-1 grid grid-cols-2 gap-6 min-h-0 overflow-hidden">
                                                         {/* Left: Controls */}
                                                         <div className="flex flex-col gap-4">
@@ -1718,6 +2607,73 @@ export default function App() {
                                                                         <span className="font-semibold text-indigo-400">{chops.length} chops detected</span>
                                                                     </div>
                                                                 </div>
+
+                                                                {/* BPM Weight Slider - only show if BPM detected */}
+                                                                {activeSample?.detectedBPM && (
+                                                                    <div className="mt-4">
+                                                                        <div className="flex items-center justify-between mb-2">
+                                                                            <label className="text-sm font-semibold text-zinc-300">
+                                                                                Transients ↔ BPM Alignment
+                                                                            </label>
+                                                                            <div className="flex items-center gap-1.5">
+                                                                                <span className="text-xs text-zinc-500">
+                                                                                    BPM: {activeSample.detectedBPM}
+                                                                                </span>
+                                                                                {activeSample.detectedBPM && (
+                                                                                    <div className="flex items-center gap-0.5">
+                                                                                        <button
+                                                                                            onClick={() => {
+                                                                                                const newBPM = activeSample.detectedBPM! * 2;
+                                                                                                setSamples(prev => prev.map(s =>
+                                                                                                    s.id === activeSampleId 
+                                                                                                        ? { ...s, detectedBPM: newBPM, bpm: newBPM }
+                                                                                                        : s
+                                                                                                ));
+                                                                                            }}
+                                                                                            className="px-1 py-0.5 text-[9px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-colors"
+                                                                                            title="Double BPM (x2)"
+                                                                                        >
+                                                                                            x2
+                                                                                        </button>
+                                                                                        <button
+                                                                                            onClick={() => {
+                                                                                                const newBPM = Math.round(activeSample.detectedBPM! / 2);
+                                                                                                setSamples(prev => prev.map(s =>
+                                                                                                    s.id === activeSampleId 
+                                                                                                        ? { ...s, detectedBPM: newBPM, bpm: newBPM }
+                                                                                                        : s
+                                                                                                ));
+                                                                                            }}
+                                                                                            className="px-1 py-0.5 text-[9px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-colors"
+                                                                                            title="Half BPM (/2)"
+                                                                                        >
+                                                                                            /2
+                                                                                        </button>
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                        <input
+                                                                            type="range"
+                                                                            min="0"
+                                                                            max="100"
+                                                                            value={bpmWeight !== null ? Math.round(bpmWeight * 100) : (activeSample.detectedBPM ? 50 : 0)}
+                                                                            onChange={(e) => {
+                                                                                const val = Number(e.target.value) / 100;
+                                                                                setBpmWeight(val === 0.5 ? null : val); // 50% = auto
+                                                                            }}
+                                                                            className="w-full max-w-[60%] h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                                                                            style={{
+                                                                                background: `linear-gradient(to right, rgb(99, 102, 241) 0%, rgb(99, 102, 241) ${bpmWeight !== null ? (bpmWeight * 100) : 50}%, rgb(39, 39, 42) ${bpmWeight !== null ? (bpmWeight * 100) : 50}%, rgb(39, 39, 42) 100%)`
+                                                                            }}
+                                                                        />
+                                                                        <div className="flex justify-between text-xs text-zinc-500 mt-1 max-w-[60%]">
+                                                                            <span>Transients</span>
+                                                                            <span className="text-zinc-400">Auto</span>
+                                                                            <span>Beat Grid</span>
+                                                                        </div>
+                                                                    </div>
+                                                                )}
                                                             </div>
 
                                                             <div className="flex items-center gap-2 shrink-0">
@@ -1749,9 +2705,9 @@ export default function App() {
                                                     </div>
                                                 )}
 
-                                                {!thresholdChoppingEnabled && (
+                                                {!autoChoppingEnabled && (
                                                     <div className="flex-1 flex items-center justify-center text-zinc-500 text-sm">
-                                                        Enable threshold chopping to detect and create chops automatically
+                                                        Enable auto chop to detect and create chops automatically
                                                     </div>
                                                 )}
                                             </div>
@@ -1882,7 +2838,7 @@ export default function App() {
                                                             onClick={() => {
                                                                 if (manualChoppingEnabled) {
                                                                     setManualChoppingEnabled(false);
-                                                                    setIsPlaying(false);
+                                                                    setPlaying(false);
                                                                     if (engine) engine.stop();
                                                                 } else {
                                                                     setManualChoppingEnabled(true);
@@ -1935,327 +2891,316 @@ export default function App() {
                             )}
 
                             {activeTab === TabView.EQ && activeSample && (
-                                <div className="h-full p-4 overflow-y-auto">
-                                    <div className="space-y-8">
-                                        {/* Multiband Filtering */}
-                                        <div>
-                                            <div className="flex items-center justify-between mb-4">
-                                                <div>
-                                                    <h4 className="text-zinc-300 text-sm font-bold mb-1">Multiband Filtering</h4>
-                                                    <p className="text-xs text-zinc-500">Adjust frequency bands</p>
-                                                </div>
-                                                <div className="flex gap-2">
-                                                    <button
-                                                        onClick={() => setFilterMode('2band')}
-                                                        className={`px-3 py-1.5 rounded text-xs font-semibold transition-all ${filterMode === '2band'
-                                                            ? 'bg-indigo-600 text-white'
-                                                            : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-                                                            }`}
-                                                    >
-                                                        2-Band
-                                                    </button>
-                                                    <button
-                                                        onClick={() => setFilterMode('3band')}
-                                                        className={`px-3 py-1.5 rounded text-xs font-semibold transition-all ${filterMode === '3band'
-                                                            ? 'bg-indigo-600 text-white'
-                                                            : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-                                                            }`}
-                                                    >
-                                                        3-Band
-                                                    </button>
-                                                </div>
+                                <div className="h-full p-4 overflow-y-auto flex items-center justify-center">
+                                    {/* 3-Band EQ Design */}
+                                    <div className={`
+                                        relative w-full max-w-4xl bg-zinc-900 rounded-3xl 
+                                        shadow-[0_20px_50px_-12px_rgba(0,0,0,1),0_0_0_1px_rgba(255,255,255,0.05),inset_0_1px_1px_rgba(255,255,255,0.05)]
+                                        overflow-hidden transition-all duration-500
+                                        ${!eqEnabled ? 'brightness-[0.4] grayscale' : ''}
+                                    `}>
+                                        
+                                        {/* Header / Status Bar */}
+                                        <div className="flex items-center justify-between px-6 pt-6 pb-4">
+                                            <div className="flex items-center gap-3">
+                                                <div className={`w-1.5 h-1.5 rounded-full ${eqEnabled ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]' : 'bg-red-900'}`}></div>
+                                                <span className="text-zinc-400 text-xs font-bold tracking-[0.2em]">EQ-3 PRO</span>
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                                <button 
+                                                    onClick={() => {
+                                                        setLowGain(0);
+                                                        setLowFreq(100);
+                                                        setMidGain(0);
+                                                        setMidFreq(1000);
+                                                        setMidQ(1.2);
+                                                        setHighGain(0);
+                                                        setHighFreq(8000);
+                                                    }}
+                                                    className="px-3 py-1.5 text-xs font-semibold text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded transition-colors"
+                                                    title="Reset EQ to defaults"
+                                                >
+                                                    Reset
+                                                </button>
+                                                <button 
+                                                    onClick={() => setEqEnabled(!eqEnabled)} 
+                                                    className={`px-4 py-2 text-xs font-bold transition-all border rounded ${
+                                                        eqEnabled 
+                                                            ? 'bg-emerald-600 border-emerald-500 text-white shadow-[0_0_10px_rgba(16,185,129,0.4)] hover:bg-emerald-500' 
+                                                            : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:border-zinc-600 hover:text-zinc-300'
+                                                    }`}
+                                                    title={eqEnabled ? "Disable EQ" : "Enable EQ"}
+                                                >
+                                                    {eqEnabled ? 'ON' : 'OFF'}
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Main Content: Visualizer and Controls in Columns */}
+                                        <div className="px-6 pb-6 flex gap-6">
+                                            {/* Left Column: Visualizer */}
+                                            <div className="flex-1">
+                                                <EQCombinedVisualizer 
+                                                    isPlaying={isPlaying}
+                                                    bands={[
+                                                        { name: 'Low', gain: lowGain, freq: lowFreq, q: 1.0, color: '#f59e0b' },
+                                                        { name: 'Mid', gain: midGain, freq: midFreq, q: midQ, color: '#3b82f6' },
+                                                        { name: 'High', gain: highGain, freq: highFreq, q: 1.0, color: '#8b5cf6' }
+                                                    ]}
+                                                />
                                             </div>
 
-                                            {filterMode === '2band' ? (
-                                                <div className="grid grid-cols-2 gap-6">
-                                                    <div className="space-y-4">
-                                                        <h5 className="text-zinc-400 text-xs font-semibold">Low Band</h5>
-                                                        <PaddleControl
-                                                            label="Frequency"
-                                                            value={lowFreq}
-                                                            onChange={setLowFreq}
-                                                            min={20}
-                                                            max={2000}
-                                                            unit="Hz"
-                                                            color="indigo"
-                                                            description="Low pass frequency"
-                                                        />
-                                                        <PaddleControl
-                                                            label="Gain"
+                                            {/* Right Column: Controls */}
+                                            <div className="flex-shrink-0">
+                                                <div className="flex justify-between bg-zinc-950/40 rounded-2xl p-5 border border-white/5 shadow-inner">
+                                                    
+                                                    {/* Low Band */}
+                                                    <div className="flex flex-col items-center gap-5 px-1 w-24">
+                                                        <EQKnob 
+                                                            label="Low"
+                                                            size="md"
                                                             value={lowGain}
-                                                            onChange={setLowGain}
-                                                            min={-24}
-                                                            max={24}
-                                                            unit="dB"
-                                                            color="indigo"
-                                                            description="Low band gain"
+                                                            min={-12}
+                                                            max={12}
+                                                            color="#f59e0b"
+                                                            onChange={(val) => setLowGain(val)}
                                                         />
+                                                        <div className="flex flex-col gap-3 pt-1 w-full items-center border-t border-white/5">
+                                                            <EQKnob 
+                                                                label="Freq"
+                                                                size="sm"
+                                                                min={20}
+                                                                max={400}
+                                                                value={lowFreq}
+                                                                color="#f59e0b"
+                                                                formatValue={(val) => val >= 1000 ? `${(val / 1000).toFixed(1)}k` : `${Math.round(val)}`}
+                                                                onChange={(val) => setLowFreq(val)}
+                                                            />
+                                                        </div>
                                                     </div>
-                                                    <div className="space-y-4">
-                                                        <h5 className="text-zinc-400 text-xs font-semibold">High Band</h5>
-                                                        <PaddleControl
-                                                            label="Frequency"
-                                                            value={highFreq}
-                                                            onChange={setHighFreq}
-                                                            min={2000}
-                                                            max={20000}
-                                                            unit="Hz"
-                                                            color="green"
-                                                            description="High pass frequency"
-                                                        />
-                                                        <PaddleControl
-                                                            label="Gain"
-                                                            value={highGain}
-                                                            onChange={setHighGain}
-                                                            min={-24}
-                                                            max={24}
-                                                            unit="dB"
-                                                            color="green"
-                                                            description="High band gain"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                <div className="grid grid-cols-3 gap-4">
-                                                    <div className="space-y-4">
-                                                        <h5 className="text-zinc-400 text-xs font-semibold">Low</h5>
-                                                        <PaddleControl
-                                                            label="Freq"
-                                                            value={lowFreq}
-                                                            onChange={setLowFreq}
-                                                            min={20}
-                                                            max={1000}
-                                                            unit="Hz"
-                                                            color="indigo"
-                                                        />
-                                                        <PaddleControl
-                                                            label="Gain"
-                                                            value={lowGain}
-                                                            onChange={setLowGain}
-                                                            min={-24}
-                                                            max={24}
-                                                            unit="dB"
-                                                            color="indigo"
-                                                        />
-                                                    </div>
-                                                    <div className="space-y-4">
-                                                        <h5 className="text-zinc-400 text-xs font-semibold">Mid</h5>
-                                                        <PaddleControl
-                                                            label="Freq"
-                                                            value={midFreq}
-                                                            onChange={setMidFreq}
-                                                            min={200}
-                                                            max={8000}
-                                                            unit="Hz"
-                                                            color="yellow"
-                                                        />
-                                                        <PaddleControl
-                                                            label="Gain"
-                                                            value={midGain}
-                                                            onChange={setMidGain}
-                                                            min={-24}
-                                                            max={24}
-                                                            unit="dB"
-                                                            color="yellow"
-                                                        />
-                                                        <PaddleControl
-                                                            label="Q"
-                                                            value={midQ}
-                                                            onChange={setMidQ}
-                                                            min={0.1}
-                                                            max={10}
-                                                            unit=""
-                                                            color="yellow"
-                                                        />
-                                                    </div>
-                                                    <div className="space-y-4">
-                                                        <h5 className="text-zinc-400 text-xs font-semibold">High</h5>
-                                                        <PaddleControl
-                                                            label="Freq"
-                                                            value={highFreq}
-                                                            onChange={setHighFreq}
-                                                            min={2000}
-                                                            max={20000}
-                                                            unit="Hz"
-                                                            color="green"
-                                                        />
-                                                        <PaddleControl
-                                                            label="Gain"
-                                                            value={highGain}
-                                                            onChange={setHighGain}
-                                                            min={-24}
-                                                            max={24}
-                                                            unit="dB"
-                                                            color="green"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            )}
 
-                                            {/* Apply Button */}
-                                            <div className="mt-6 flex justify-end">
-                                                <button
-                                                    onClick={() => {
+                                                    <div className="w-px bg-zinc-800/80 my-2"></div>
+
+                                                    {/* Mid Band */}
+                                                    <div className="flex flex-col items-center gap-5 px-1 w-24">
+                                                        <EQKnob 
+                                                            label="Mid"
+                                                            size="md"
+                                                            value={midGain}
+                                                            min={-12}
+                                                            max={12}
+                                                            color="#10b981"
+                                                            onChange={(val) => setMidGain(val)}
+                                                        />
+                                                        <div className="flex flex-col gap-3 pt-1 w-full items-center border-t border-white/5">
+                                                            <div className="flex items-center justify-between w-full gap-2">
+                                                                <EQKnob 
+                                                                    label="Freq"
+                                                                    size="sm"
+                                                                    min={400}
+                                                                    max={4000}
+                                                                    value={midFreq}
+                                                                    color="#10b981"
+                                                                    formatValue={(val) => val >= 1000 ? `${(val / 1000).toFixed(1)}k` : `${Math.round(val)}`}
+                                                                    onChange={(val) => setMidFreq(val)}
+                                                                />
+                                                                <EQKnob 
+                                                                    label="Q"
+                                                                    size="sm"
+                                                                    min={0.1}
+                                                                    max={10}
+                                                                    value={midQ}
+                                                                    color="#10b981"
+                                                                    formatValue={(val) => val.toFixed(1)}
+                                                                    onChange={(val) => setMidQ(val)}
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="w-px bg-zinc-800/80 my-2"></div>
+
+                                                    {/* High Band */}
+                                                    <div className="flex flex-col items-center gap-5 px-1 w-24">
+                                                        <EQKnob 
+                                                            label="High"
+                                                            size="md"
+                                                            value={highGain}
+                                                            min={-12}
+                                                            max={12}
+                                                            color="#3b82f6"
+                                                            onChange={(val) => setHighGain(val)}
+                                                        />
+                                                        <div className="flex flex-col gap-3 pt-1 w-full items-center border-t border-white/5">
+                                                            <EQKnob 
+                                                                label="Freq"
+                                                                size="sm"
+                                                                min={4000}
+                                                                max={20000}
+                                                                value={highFreq}
+                                                                color="#3b82f6"
+                                                                formatValue={(val) => val >= 1000 ? `${(val / 1000).toFixed(1)}k` : `${Math.round(val)}`}
+                                                                onChange={(val) => setHighFreq(val)}
+                                                            />
+                                                        </div>
+                                                    </div>
+
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Apply Button - Centered */}
+                                        <div className="px-8 pb-6 flex justify-center">
+                                            <button
+                                                onClick={() => {
+                                                    // Check if there's a pending crop
+                                                    if (hasPendingCrop()) {
+                                                        setProcessingDialog({
+                                                            isOpen: true,
+                                                            type: 'filter-with-crop',
+                                                            onConfirm: async () => {
+                                                                setProcessingDialog(null);
+                                                                if (activeSample && engine && activeSample.buffer) {
+                                                                    try {
+                                                                        // Apply EQ only (no crop)
+                                                                        const processedBuffer = await engine.applyEffectsAndResample(activeSample.buffer);
+                                                                        if (processedBuffer) {
+                                                                            const blob = audioBufferToWav(processedBuffer);
+                                                                            const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+                                                                            const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
+                                                                            const newName = `${originalName}_EQ.${extension}`;
+                                                                            
+                                                                            const newSample: Sample = {
+                                                                                ...activeSample,
+                                                                                id: Date.now().toString(),
+                                                                                name: newName,
+                                                                                duration: formatDuration(processedBuffer.duration),
+                                                                                size: `${(blob.size / 1024 / 1024).toFixed(2)} MB`,
+                                                                                buffer: processedBuffer,
+                                                                                blob: blob,
+                                                                                waveform: []
+                                                                            };
+                                                                            
+                                                                            setSamples(prev => [newSample, ...prev]);
+                                                                            setActiveSample(newSample.id);
+                                                                            
+                                                                            // Reset effects
+                                                                            if (engine) {
+                                                                                engine.setDelay(0.3, 0.3, 0);
+                                                                                engine.setReverb(0.5, 0.5, 0);
+                                                                            }
+                                                                            usePlaybackStore.getState().resetEffects();
+                                                                            prevStretchRatioRef.current = 1.0;
+                                                                        }
+                                                                    } catch (error) {
+                                                                        console.error('Error applying EQ:', error);
+                                                                    }
+                                                                }
+                                                            },
+                                                            onApplyWithCrop: async () => {
+                                                                setProcessingDialog(null);
+                                                                if (activeSample && engine && activeSample.buffer) {
+                                                                    try {
+                                                                        // First apply crop, then EQ
+                                                                        const tempSampleStub = {
+                                                                            buffer: activeSample.buffer,
+                                                                            trimStart: region.start,
+                                                                            trimEnd: region.end
+                                                                        };
+                                                                        const croppedBuffer = await engine.crop(tempSampleStub);
+                                                                        if (!croppedBuffer) return;
+                                                                        
+                                                                        // Reset region after crop is applied
+                                                                        if (activeSampleId) {
+                    setRegion(activeSampleId, { start: 0, end: 1 });
+                }
+                                                                        
+                                                                        const processedBuffer = await engine.applyEffectsAndResample(croppedBuffer);
+                                                                        if (processedBuffer) {
+                                                                            const blob = audioBufferToWav(processedBuffer);
+                                                                            const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+                                                                            const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
+                                                                            const newName = `${originalName}_Cropped_EQ.${extension}`;
+                                                                            
+                                                                            const newSample: Sample = {
+                                                                                ...activeSample,
+                                                                                id: Date.now().toString(),
+                                                                                name: newName,
+                                                                                duration: formatDuration(processedBuffer.duration),
+                                                                                size: `${(blob.size / 1024 / 1024).toFixed(2)} MB`,
+                                                                                buffer: processedBuffer,
+                                                                                blob: blob,
+                                                                                waveform: []
+                                                                            };
+                                                                            
+                                                                            setSamples(prev => [newSample, ...prev]);
+                                                                            setActiveSample(newSample.id);
+                                                                            
+                                                                            // Reset effects
+                                                                            if (engine) {
+                                                                                engine.setDelay(0.3, 0.3, 0);
+                                                                                engine.setReverb(0.5, 0.5, 0);
+                                                                            }
+                                                                            usePlaybackStore.getState().resetEffects();
+                                                                            prevStretchRatioRef.current = 1.0;
+                                                                        }
+                                                                    } catch (error) {
+                                                                        console.error('Error applying EQ with crop:', error);
+                                                                    }
+                                                                }
+                                                            }
+                                                        });
+                                                    } else {
+                                                        // No pending crop, apply EQ normally
                                                         setProcessingDialog({
                                                             isOpen: true,
                                                             type: 'filter',
                                                             onConfirm: async () => {
                                                                 setProcessingDialog(null);
-                                                                // TODO: Implement multiband filtering processing
-                                                                // For now, just show that it would create a filtered sample
-                                                                if (activeSample && engine) {
-                                                                    // This would need to be implemented in AudioEngine
-                                                                    const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
-                                                                    const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
-                                                                    const newName = `${originalName}_Filtered.${extension}`;
-                                                                    // Placeholder - actual filtering would go here
-                                                                    console.log('Multiband filtering would be applied:', { filterMode, lowFreq, highFreq, lowGain, highGain, midFreq, midGain, midQ });
+                                                                if (activeSample && engine && activeSample.buffer) {
+                                                                    try {
+                                                                        const processedBuffer = await engine.applyEffectsAndResample(activeSample.buffer);
+                                                                        if (processedBuffer) {
+                                                                            const blob = audioBufferToWav(processedBuffer);
+                                                                            const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+                                                                            const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
+                                                                            const newName = `${originalName}_EQ.${extension}`;
+                                                                            
+                                                                            const newSample: Sample = {
+                                                                                ...activeSample,
+                                                                                id: Date.now().toString(),
+                                                                                name: newName,
+                                                                                duration: formatDuration(processedBuffer.duration),
+                                                                                size: `${(blob.size / 1024 / 1024).toFixed(2)} MB`,
+                                                                                buffer: processedBuffer,
+                                                                                blob: blob,
+                                                                                waveform: []
+                                                                            };
+                                                                            
+                                                                            setSamples(prev => [newSample, ...prev]);
+                                                                            setActiveSample(newSample.id);
+                                                                            
+                                                                            // Reset all effects and preview state when effects are baked into sample
+                                                                            // This prevents double application when the new sample is played
+                                                                            if (engine) {
+                                                                                engine.setDelay(0.3, 0.3, 0);
+                                                                                engine.setReverb(0.5, 0.5, 0);
+                                                                            }
+                                                                            usePlaybackStore.getState().resetEffects();
+                                                                            prevStretchRatioRef.current = 1.0;
+                                                                        }
+                                                                    } catch (error) {
+                                                                        console.error('Error applying EQ:', error);
+                                                                    }
                                                                 }
                                                             }
                                                         });
-                                                    }}
-                                                    className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded transition-colors shadow-lg shadow-indigo-500/20"
-                                                >
-                                                    Apply Filtering
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        {/* ADSR Processing */}
-                                        <div>
-                                            <div className="flex items-center justify-between mb-4">
-                                                <div>
-                                                    <h4 className="text-zinc-300 text-sm font-bold mb-1">ADSR Processing</h4>
-                                                    <p className="text-xs text-zinc-500">Envelope shaping</p>
-                                                </div>
-                                                <div className="flex gap-2">
-                                                    <button
-                                                        onClick={() => setAdsrMode('envelope')}
-                                                        className={`px-3 py-1.5 rounded text-xs font-semibold transition-all ${adsrMode === 'envelope'
-                                                            ? 'bg-indigo-600 text-white'
-                                                            : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-                                                            }`}
-                                                    >
-                                                        Envelope
-                                                    </button>
-                                                    <button
-                                                        onClick={() => setAdsrMode('gate')}
-                                                        className={`px-3 py-1.5 rounded text-xs font-semibold transition-all ${adsrMode === 'gate'
-                                                            ? 'bg-indigo-600 text-white'
-                                                            : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-                                                            }`}
-                                                    >
-                                                        Gate
-                                                    </button>
-                                                </div>
-                                            </div>
-
-                                            {adsrMode === 'envelope' ? (
-                                                <div className="grid grid-cols-4 gap-4">
-                                                    <PaddleControl
-                                                        label="Attack"
-                                                        value={attack * 1000}
-                                                        onChange={(v) => setAttack(v / 1000)}
-                                                        min={1}
-                                                        max={1000}
-                                                        unit="ms"
-                                                        color="indigo"
-                                                    />
-                                                    <PaddleControl
-                                                        label="Decay"
-                                                        value={decay * 1000}
-                                                        onChange={(v) => setDecay(v / 1000)}
-                                                        min={1}
-                                                        max={1000}
-                                                        unit="ms"
-                                                        color="yellow"
-                                                    />
-                                                    <PaddleControl
-                                                        label="Sustain"
-                                                        value={sustain * 100}
-                                                        onChange={(v) => setSustain(v / 100)}
-                                                        min={0}
-                                                        max={100}
-                                                        unit="%"
-                                                        color="green"
-                                                    />
-                                                    <PaddleControl
-                                                        label="Release"
-                                                        value={release * 1000}
-                                                        onChange={(v) => setRelease(v / 1000)}
-                                                        min={1}
-                                                        max={2000}
-                                                        unit="ms"
-                                                        color="red"
-                                                    />
-                                                </div>
-                                            ) : (
-                                                <div className="grid grid-cols-4 gap-4">
-                                                    <PaddleControl
-                                                        label="Threshold"
-                                                        value={gateThreshold}
-                                                        onChange={setGateThreshold}
-                                                        min={-60}
-                                                        max={0}
-                                                        unit="dB"
-                                                        color="indigo"
-                                                    />
-                                                    <PaddleControl
-                                                        label="Ratio"
-                                                        value={gateRatio}
-                                                        onChange={setGateRatio}
-                                                        min={1}
-                                                        max={20}
-                                                        unit=":1"
-                                                        color="yellow"
-                                                    />
-                                                    <PaddleControl
-                                                        label="Attack"
-                                                        value={gateAttack * 1000}
-                                                        onChange={(v) => setGateAttack(v / 1000)}
-                                                        min={0.1}
-                                                        max={100}
-                                                        unit="ms"
-                                                        color="green"
-                                                    />
-                                                    <PaddleControl
-                                                        label="Release"
-                                                        value={gateRelease * 1000}
-                                                        onChange={(v) => setGateRelease(v / 1000)}
-                                                        min={1}
-                                                        max={500}
-                                                        unit="ms"
-                                                        color="red"
-                                                    />
-                                                </div>
-                                            )}
-
-                                            {/* Apply Button */}
-                                            <div className="mt-6 flex justify-end">
-                                                <button
-                                                    onClick={() => {
-                                                        setProcessingDialog({
-                                                            isOpen: true,
-                                                            type: 'adsr',
-                                                            onConfirm: async () => {
-                                                                setProcessingDialog(null);
-                                                                // TODO: Implement ADSR processing
-                                                                // For now, just show that it would create an ADSR processed sample
-                                                                if (activeSample && engine) {
-                                                                    const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
-                                                                    const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
-                                                                    const newName = `${originalName}_ADSR.${extension}`;
-                                                                    // Placeholder - actual ADSR processing would go here
-                                                                    console.log('ADSR processing would be applied:', { adsrMode, attack, decay, sustain, release, gateThreshold, gateRatio, gateAttack, gateRelease });
-                                                                }
-                                                            }
-                                                        });
-                                                    }}
-                                                    className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-semibold rounded transition-colors shadow-lg shadow-purple-500/20"
-                                                >
-                                                    Apply ADSR
-                                                </button>
-                                            </div>
+                                                    }
+                                                }}
+                                                className="px-8 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded transition-colors shadow-lg shadow-indigo-500/20"
+                                            >
+                                                Apply EQ to Sample
+                                            </button>
                                         </div>
                                     </div>
                                 </div>
@@ -2264,7 +3209,20 @@ export default function App() {
                             {activeTab === TabView.TIME_STRETCH && activeSample && (
                                 <div className="flex flex-col h-full overflow-auto p-4 gap-6">
                                     <div>
-                                        <h4 className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-3">Time Stretching</h4>
+                                        <div className="flex items-center justify-between mb-3">
+                                            <h4 className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">Time Stretching</h4>
+                                            <button 
+                                                onClick={() => setTimeStretchEnabled(!timeStretchEnabled)} 
+                                                className={`px-4 py-2 text-xs font-bold transition-all border rounded ${
+                                                    timeStretchEnabled 
+                                                        ? 'bg-emerald-600 border-emerald-500 text-white shadow-[0_0_10px_rgba(16,185,129,0.4)] hover:bg-emerald-500' 
+                                                        : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:border-zinc-600 hover:text-zinc-300'
+                                                }`}
+                                                title={timeStretchEnabled ? "Disable Time-Stretch" : "Enable Time-Stretch"}
+                                            >
+                                                {timeStretchEnabled ? 'ON' : 'OFF'}
+                                            </button>
+                                        </div>
                                         <div className="space-y-4">
                                             {/* Sample Tempo */}
                                             <div className="flex flex-col gap-2">
@@ -2466,45 +3424,10 @@ export default function App() {
                                             )}
                                             <div className="flex gap-2">
                                             <button
-                                                onClick={async () => {
-                                                    if (!activeSample?.buffer || !engine) return;
-                                                    
-                                                    // Real-time preview using playbackRate
-                                                    if (isPreviewingStretch) {
-                                                        // Stop preview early (user clicked stop)
-                                                        engine.stop();
-                                                        setIsPreviewingStretch(false);
-                                                        setIsPlaying(false);
-                                                        // onPlaybackEnded will be restored by useEffect when engine state changes
-                                                    } else {
-                                                        // Start preview
-                                                        setIsPreviewingStretch(true);
-                                                        const playbackRate = 1 / timeStretchRatio; // Inverse for time stretching
-                                                        
-                                                        // Temporarily disable onPlaybackEnded callback to prevent premature stop.
-                                                        // The source.onended event fires when the buffer finishes playing, which happens
-                                                        // at the original buffer duration, not the stretched duration. During
-                                                        // time-stretched preview, we use setTimeout instead to stop at the correct time.
-                                                        const originalOnPlaybackEnded = engine.onPlaybackEnded;
-                                                        engine.onPlaybackEnded = null;
-                                                        
-                                                        engine.play(activeSample.buffer, 0, 1, false, playbackRate);
-                                                        setIsPlaying(true);
-                                                        
-                                                        // Calculate stretched duration (real-time duration)
-                                                        const bufferDuration = activeSample.buffer.duration;
-                                                        const stretchedDuration = bufferDuration / playbackRate;
-                                                        
-                                                        // Stop preview when audio actually ends (use stretched duration)
-                                                        setTimeout(() => {
-                                                            setIsPreviewingStretch(false);
-                                                            setIsPlaying(false);
-                                                            // Restore original callback (useEffect will also restore it, but this ensures it)
-                                                            if (engine.onPlaybackEnded === null) {
-                                                                engine.onPlaybackEnded = originalOnPlaybackEnded;
-                                                            }
-                                                        }, stretchedDuration * 1000);
-                                                    }
+                                                onClick={() => {
+                                                    // Preview button now works like regular play button
+                                                    // When time-stretch is enabled, both buttons do the same thing
+                                                    handlePlayToggle();
                                                 }}
                                                 disabled={activeSample.isTimeStretching || !activeSample.buffer}
                                                 className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 disabled:cursor-not-allowed text-white text-xs font-bold rounded border border-zinc-600 transition-colors"
@@ -2520,113 +3443,23 @@ export default function App() {
                                                         return;
                                                     }
                                                     
-                                                    // Capture all needed data before async operations
-                                                    const currentSampleId = activeSample.id;
-                                                    const currentBuffer = activeSample.buffer;
-                                                    const currentName = activeSample.name;
-                                                    const currentBpm = activeSample.bpm;
-                                                    const currentTags = [...activeSample.tags];
-                                                    
-                                                    console.log('Starting time stretch...', { 
-                                                        sampleId: currentSampleId,
-                                                        ratio: timeStretchRatio,
-                                                        bufferLength: currentBuffer.length,
-                                                        sampleRate: currentBuffer.sampleRate
-                                                    });
-                                                    
-                                                    setTimeStretchProgress(0);
-                                                    setSamples(prevSamples => 
-                                                        prevSamples.map(s => 
-                                                            s.id === currentSampleId ? { ...s, isTimeStretching: true } : s
-                                                        )
-                                                    );
-                                                    
-                                                    try {
-                                                        // Detect BPM before stretching
-                                                        let originalBPM: number | null = null;
-                                                        try {
-                                                            const bpmResult = await engine.detectBPM(currentBuffer);
-                                                            if (bpmResult && bpmResult.bpm) {
-                                                                originalBPM = bpmResult.bpm;
-                                                                console.log('Detected BPM before stretching:', originalBPM);
+                                                    // Check if there's a pending crop
+                                                    if (hasPendingCrop()) {
+                                                        setProcessingDialog({
+                                                            isOpen: true,
+                                                            type: 'timeStretch-with-crop',
+                                                            onConfirm: async () => {
+                                                                setProcessingDialog(null);
+                                                                await applyTimeStretch(false); // Time stretch only (no crop)
+                                                            },
+                                                            onApplyWithCrop: async () => {
+                                                                setProcessingDialog(null);
+                                                                await applyTimeStretch(true); // Apply crop then time stretch
                                                             }
-                                                        } catch (bpmError) {
-                                                            console.warn('BPM detection failed, continuing without BPM update:', bpmError);
-                                                        }
-                                                        
-                                                        // Calculate new BPM based on stretch ratio
-                                                        const newBPM = originalBPM ? originalBPM * timeStretchRatio : currentBpm;
-                                                        
-                                                        const stretched = await engine.timeStretch(
-                                                            currentBuffer,
-                                                            timeStretchRatio,
-                                                            (progress) => {
-                                                                setTimeStretchProgress(progress);
-                                                            }
-                                                        );
-                                                        
-                                                        if (!stretched || !stretched.length) {
-                                                            throw new Error('Time stretch returned invalid buffer');
-                                                        }
-                                                        
-                                                        console.log('Time stretch completed successfully', {
-                                                            originalLength: currentBuffer.length,
-                                                            stretchedLength: stretched.length,
-                                                            originalDuration: currentBuffer.duration,
-                                                            stretchedDuration: stretched.duration,
-                                                            originalBPM,
-                                                            newBPM
                                                         });
-                                                        
-                                                        const blob = audioBufferToWav(stretched);
-                                                        const originalName = currentName.replace(/\.(wav|mp3|flac|ogg)$/i, '');
-                                                        const extension = currentName.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
-                                                        const newName = `${originalName}_Stretched_${timeStretchRatio.toFixed(2)}x.${extension}`;
-                                                        
-                                                        const newSample: Sample = {
-                                                            id: Date.now().toString(),
-                                                            name: newName,
-                                                            duration: formatDuration(stretched.duration),
-                                                            bpm: typeof newBPM === 'number' ? Math.round(newBPM) : newBPM,
-                                                            size: `${(blob.size / 1024 / 1024).toFixed(2)} MB`,
-                                                            waveform: [],
-                                                            tags: [...currentTags, 'Time Stretched'],
-                                                            buffer: stretched,
-                                                            blob: blob,
-                                                            trimStart: 0,
-                                                            trimEnd: 1,
-                                                            detectedBPM: typeof newBPM === 'number' ? newBPM : undefined
-                                                        };
-                                                        
-                                                        // Use functional updates to ensure we have the latest state
-                                                        setSamples(prevSamples => {
-                                                            // First, clear the isTimeStretching flag from the original sample
-                                                            const updatedSamples = prevSamples.map(s => 
-                                                                s.id === currentSampleId ? { ...s, isTimeStretching: false } : s
-                                                            );
-                                                            // Then add the new sample at the beginning
-                                                            return [newSample, ...updatedSamples];
-                                                        });
-                                                        
-                                                        // Set the new sample as active
-                                                        console.log('Setting new sample as active:', newSample.id, newSample.name);
-                                                        setActiveSampleId(newSample.id);
-                                                    } catch (error) {
-                                                        console.error('Time stretch error:', error);
-                                                        const errorMessage = error instanceof Error ? error.message : String(error);
-                                                        console.error('Error details:', { error, errorMessage, stack: error instanceof Error ? error.stack : undefined });
-                                                        alert(`Time stretch failed: ${errorMessage}\n\nCheck the console for more details.`);
-                                                        
-                                                        // Clear the isTimeStretching flag on error and preserve active sample
-                                                        setSamples(prevSamples => 
-                                                            prevSamples.map(s => 
-                                                                s.id === currentSampleId ? { ...s, isTimeStretching: false } : s
-                                                            )
-                                                        );
-                                                        // Make sure we don't deselect the sample on error
-                                                        setActiveSampleId(currentSampleId);
-                                                    } finally {
-                                                        setTimeStretchProgress(0);
+                                                    } else {
+                                                        // No pending crop, apply time stretch normally
+                                                        await applyTimeStretch(false);
                                                     }
                                                 }}
                                                 disabled={activeSample.isTimeStretching || !activeSample.buffer}
@@ -2639,7 +3472,7 @@ export default function App() {
                                                     </>
                                                 ) : (
                                                     <>
-                                                        <Gauge className="w-4 h-4" />
+                                                        <Sparkles className="w-4 h-4" />
                                                         Apply Time Stretch
                                                     </>
                                                 )}
@@ -2845,17 +3678,25 @@ export default function App() {
                             processingDialog.type === 'normalize' ? 'Normalize Audio' :
                                 processingDialog.type === 'filter' ? 'Apply Multiband Filter' :
                                     processingDialog.type === 'adsr' ? 'Apply ADSR Processing' :
-                                        'Process Chops'
+                                        processingDialog.type === 'chop-with-processing' ? 'Chop Sample with Pending Changes' :
+                                            processingDialog.type === 'filter-with-crop' ? 'Apply EQ with Pending Crop' :
+                                                processingDialog.type === 'timeStretch-with-crop' ? 'Time Stretch with Pending Crop' :
+                                                    'Process Chops'
                     }
                     description={
                         processingDialog.type === 'crop' ? 'Create a new sample from the selected region' :
                             processingDialog.type === 'normalize' ? 'Normalize audio levels to maximum without clipping' :
                                 processingDialog.type === 'filter' ? 'Apply multiband filtering to the sample' :
                                     processingDialog.type === 'adsr' ? 'Apply ADSR envelope shaping to the sample' :
-                                        'Create individual samples from chops'
+                                        processingDialog.type === 'chop-with-processing' ? 'You have region adjustments or EQ settings active. Apply them before chopping?' :
+                                            processingDialog.type === 'filter-with-crop' ? 'You have region adjustments active. Apply the crop as well?' :
+                                                processingDialog.type === 'timeStretch-with-crop' ? 'You have region adjustments active. Apply the crop as well?' :
+                                                    'Create individual samples from chops'
                     }
                     processingType={processingDialog.type}
                     onConfirm={processingDialog.onConfirm}
+                    onApplyAndChop={processingDialog.onApplyAndChop}
+                    onApplyWithCrop={processingDialog.onApplyWithCrop}
                     onCancel={() => setProcessingDialog(null)}
                 />
             )}
