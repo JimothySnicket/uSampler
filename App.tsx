@@ -19,44 +19,66 @@ interface ChromeWindowsAPI {
     };
 }
 
+interface ChromeTabsAPI {
+    query: (queryInfo: { active?: boolean; currentWindow?: boolean }, callback: (tabs: Array<{ id?: number; url?: string; muted?: boolean }>) => void) => void;
+    update: (tabId: number, updateInfo: { muted?: boolean }, callback?: (tab?: { id?: number; muted?: boolean }) => void) => void;
+    get: (tabId: number, callback: (tab: { id?: number; muted?: boolean }) => void) => void;
+}
+
+interface ChromeTabCaptureAPI {
+    getMediaStreamId: (options: { targetTabId?: number }, callback: (streamId?: string) => void) => void;
+}
+
+interface ChromeRuntimeAPI {
+    lastError?: { message: string };
+}
+
 declare const chrome: {
     windows?: ChromeWindowsAPI;
+    tabs?: ChromeTabsAPI;
+    tabCapture?: ChromeTabCaptureAPI;
+    runtime?: ChromeRuntimeAPI;
 } | undefined;
 import {
     Play, Pause, Square, SkipBack, Scissors,
-    Sliders, Lock, MonitorPlay, ChevronDown, RefreshCcw, Crop, Volume2, AudioWaveform, Keyboard, ChevronRight, Sparkles, Loader2, Gauge, Split, Power, Repeat
+    Sliders, Lock, MonitorPlay, ChevronDown, RefreshCcw, Crop, Volume2, Keyboard, ChevronRight, Sparkles, Loader2, Gauge, Power, Repeat, Save, FolderOpen, VolumeX
 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
+import { Logo } from './components/Logo';
 import { WaveformDisplay } from './components/WaveformDisplay';
 import { UnifiedControl } from './components/UnifiedControl';
 import { PaddleControl } from './components/PaddleControl';
 import { ProcessingDialog } from './components/ProcessingDialog';
+import { NoiseReductionTab } from './components/NoiseReductionTab';
+import { SessionDialog } from './components/SessionDialog';
+import { ExportDialog, ExportFormat as ExportDialogFormat, ExportSampleRate, MP3Bitrate } from './components/ExportDialog';
 import { EQKnob } from './components/EQKnob';
 import { EQVisualizer } from './components/EQVisualizer';
 import { EQWaveformVisualizer } from './components/EQWaveformVisualizer';
 import { EQOscilloscopeVisualizer } from './components/EQOscilloscopeVisualizer';
 import { EQCombinedVisualizer } from './components/EQCombinedVisualizer';
-import { formatDuration, audioBufferToWav } from './src/utils/audioUtils';
+import { formatDuration, audioBufferToWav, audioBufferToFormat, ExportFormat } from './src/utils/audioUtils';
+import { downloadBlobWithPreference } from './src/utils/downloadUtils';
 import { Sample, Region, TabView, Chop } from './types';
 import { AudioState } from './src/core/AudioEngine';
 import JSZip from 'jszip';
 
-// Dev version - increment this number with each update
-const DEV_VERSION = '2.4';
+// Version number
+const DEV_VERSION = '1.0.0';
 
 export default function App() {
     const { engine, state, startRecording, stopRecording, toggleArm, isArmed, selectSource, setRecordingCallback } = useAudio();
 
     const isRecording = state === AudioState.RECORDING;
-    
+
     // Zustand store selectors
     // Select state values - these will trigger re-renders when they change
     const isPlaying = usePlaybackStore(state => state.isPlaying);
     const isLooping = usePlaybackStore(state => state.isLooping);
     const playbackTime = usePlaybackStore(state => state.playbackTime);
     const activeSampleId = usePlaybackStore(state => state.activeSampleId);
-    
-    
+
+
     // Select actions - Zustand ensures these are stable references
     const setActiveSample = usePlaybackStore(state => state.setActiveSample);
     const setLooping = usePlaybackStore(state => state.setLooping);
@@ -68,13 +90,13 @@ export default function App() {
     const setChops = usePlaybackStore(state => state.setChops);
     const getActiveChopId = usePlaybackStore(state => state.getActiveChopId);
     const setActiveChopId = usePlaybackStore(state => state.setActiveChopId);
-    
+
     // Get current region and chops for active sample
     // Subscribe to store state to get reactive updates
     const sampleStates = usePlaybackStore(state => state.sampleStates);
     const region = useMemo(() => {
-        return activeSampleId && sampleStates[activeSampleId] 
-            ? sampleStates[activeSampleId].region 
+        return activeSampleId && sampleStates[activeSampleId]
+            ? sampleStates[activeSampleId].region
             : { start: 0, end: 1 };
     }, [activeSampleId, sampleStates]);
     const chops = useMemo(() => {
@@ -87,12 +109,12 @@ export default function App() {
             ? sampleStates[activeSampleId].activeChopId
             : null;
     }, [activeSampleId, sampleStates]);
-    
+
     // Loop is a global state - it affects what happens when playback reaches the end
     // The AudioEngine's play() method will use the current loop state when starting playback
     // When loop is ON: playback will automatically restart at the end
     // When loop is OFF: playback will stop at the end
-    
+
     const [activeTab, setActiveTab] = useState<TabView>(TabView.MAIN);
     const [samples, setSamples] = useState<Sample[]>([]);
     const [selectedSampleIds, setSelectedSampleIds] = useState<Set<string>>(new Set());
@@ -101,6 +123,8 @@ export default function App() {
     const [isMuted, setIsMuted] = useState(false);
     const [activeSourceTitle, setActiveSourceTitle] = useState('Select Source');
     const [isSourceConnected, setIsSourceConnected] = useState(false);
+    const [muteSourceDuringRecording, setMuteSourceDuringRecording] = useState(false);
+    const [sourceTabId, setSourceTabId] = useState<number | null>(null);
 
     // Multiband filtering state (3-band EQ defaults matching design) - from Zustand store
     const eqSettings = usePlaybackStore(state => state.eqSettings);
@@ -116,7 +140,7 @@ export default function App() {
     const setEQGain = usePlaybackStore(state => state.setEQGain);
     const setEQFreq = usePlaybackStore(state => state.setEQFreq);
     const setMidQ = usePlaybackStore(state => state.setMidQ);
-    
+
     // Local setters for backward compatibility
     const setEqEnabled = (enabled: boolean) => setEQEnabled(enabled);
     const setLowFreq = (freq: number) => setEQFreq('low', freq);
@@ -138,6 +162,9 @@ export default function App() {
     const [gateRatio, setGateRatio] = useState(4); // ratio
     const [gateAttack, setGateAttack] = useState(0.01); // seconds
     const [gateRelease, setGateRelease] = useState(0.1); // seconds
+    const [noiseGateEnabled, setNoiseGateEnabled] = useState(false);
+    const [liveNoiseSensitivity, setLiveNoiseSensitivity] = useState(0.5);
+    const [liveNoiseAmount, setLiveNoiseAmount] = useState(0.5);
 
     // Chopping state (chops and activeChopId now from store, others remain local)
     const [chopThreshold, setChopThreshold] = useState(30); // % (higher = fewer chops)
@@ -149,17 +176,34 @@ export default function App() {
     const [autoChoppingEnabled, setAutoChoppingEnabled] = useState(false);
     const [chopSubTab, setChopSubTab] = useState<'auto' | 'equal' | 'manual'>('auto');
 
-    // Sample rate selector
-    const [exportSampleRate, setExportSampleRate] = useState<number | null>(null);
+    // Export dialog state
+    const [exportDialog, setExportDialog] = useState<{
+        isOpen: boolean;
+        mode: 'save-selected' | 'export-all';
+        sampleId?: string; // For save-selected mode
+    } | null>(null);
 
     // Processing dialog state
     const [processingDialog, setProcessingDialog] = useState<{
         isOpen: boolean;
-        type: 'crop' | 'normalize' | 'filter' | 'adsr' | 'chop' | 'chop-with-processing' | 'filter-with-crop' | 'timeStretch-with-crop';
+        type: 'crop' | 'normalize' | 'noise-reduction' | 'filter' | 'adsr' | 'chop' | 'chop-with-processing' | 'filter-with-crop' | 'timeStretch-with-crop';
+        title?: string;
+        description?: string;
         onConfirm: () => void;
         onApplyAndChop?: () => void; // For chop-with-processing dialog
         onApplyWithCrop?: () => void; // For filter/timeStretch-with-crop dialog
     } | null>(null);
+
+
+    // Session dialog state
+    const [sessionDialogMode, setSessionDialogMode] = useState<'save' | 'load' | null>(null);
+
+
+
+
+
+    const [noiseSensitivity, setNoiseSensitivity] = useState(0.5);
+    const [noiseAmount, setNoiseAmount] = useState(0.5);
 
     // Edit mode (individual vs all)
     const [editMode, setEditMode] = useState<'individual' | 'all'>('individual');
@@ -167,7 +211,7 @@ export default function App() {
     // Manual chopping state
     const [manualChoppingEnabled, setManualChoppingEnabled] = useState(false);
     const [manualChopPoints, setManualChopPoints] = useState<number[]>([]);
-    
+
     // Track which samples have manually edited chops (to prevent auto chop from overwriting)
     const [manuallyEditedChops, setManuallyEditedChops] = useState<Set<string>>(new Set());
 
@@ -183,7 +227,7 @@ export default function App() {
     const setTimeStretchEnabled = usePlaybackStore(state => state.setTimeStretchEnabled);
     const setPreviewingStretch = usePlaybackStore(state => state.setPreviewingStretch);
     const [timeStretchProgress, setTimeStretchProgress] = useState(0);
-    
+
     // Local setter for backward compatibility
     const setIsPreviewingStretch = (previewing: boolean) => setPreviewingStretch(previewing);
     const [targetTempo, setTargetTempo] = useState<number | null>(null);
@@ -191,11 +235,15 @@ export default function App() {
     const [isDetectingBPM, setIsDetectingBPM] = useState(false);
     const prevStretchRatioRef = useRef<number>(1.0);
     const prevTimeStretchEnabledRef = useRef<boolean>(false);
+    const prevNoiseGateSettingsRef = useRef<{ enabled: boolean; sensitivity: number; amount: number }>({
+        enabled: false,
+        sensitivity: 0.5,
+        amount: 0.5
+    });
     const restartTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const noiseGateRestartTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const isRestartingNoiseGateRef = useRef<boolean>(false);
 
-    // Stem separation state
-    const [stemModelType, setStemModelType] = useState<'2stems' | '4stems' | '5stems'>('4stems');
-    const [stemSeparationServer, setStemSeparationServer] = useState<string>('');
 
     const activeSample = samples.find(s => s.id === activeSampleId);
 
@@ -227,6 +275,13 @@ export default function App() {
             console.log('[App] Creating new sample:', newSample.name);
             setSamples(prev => [newSample, ...prev]);
             setActiveSample(newSample.id);
+            
+            // Reset all effects when a new sample is recorded to ensure clean, unprocessed sample
+            // This ensures the new sample plays cleanly unless user explicitly applies effects
+            usePlaybackStore.getState().resetEffects();
+            setNoiseGateEnabled(false);
+            setLiveNoiseSensitivity(0.5);
+            setLiveNoiseAmount(0.5);
         });
     }, [setRecordingCallback]);
 
@@ -234,6 +289,17 @@ export default function App() {
     useEffect(() => {
         const init = async () => {
             try {
+                // Get targetTabId from URL if present
+                const urlParams = new URLSearchParams(window.location.search);
+                const targetTabIdParam = urlParams.get('targetTabId');
+                if (targetTabIdParam) {
+                    const tabId = parseInt(targetTabIdParam, 10);
+                    if (!isNaN(tabId)) {
+                        setSourceTabId(tabId);
+                        console.log(`[App] Target tab ID from URL: ${tabId}`);
+                    }
+                }
+
                 await new Promise(resolve => setTimeout(resolve, 100));
                 // Only initialize if no source is connected
                 if (engine && !engine.sourceNode) {
@@ -297,7 +363,7 @@ export default function App() {
                 // Ensure window is at correct size on mount with a small delay
                 setTimeout(() => {
                     chrome.windows!.getCurrent((currentWindow) => {
-                        if (currentWindow && currentWindow.id && 
+                        if (currentWindow && currentWindow.id &&
                             (currentWindow.width !== 1200 || currentWindow.height !== 900)) {
                             chrome.windows!.update(currentWindow.id, {
                                 width: 1200,
@@ -318,12 +384,12 @@ export default function App() {
                 // This callback fires when playback ends naturally - check loop state to decide whether to loop or stop
                 const store = usePlaybackStore.getState();
                 const currentLoopState = store.isLooping; // Check store value - it's the global toggle
-                
+
                 // Also get current sample state from store to avoid stale closures
                 const currentActiveSampleId = store.activeSampleId;
                 const currentSampleStates = store.sampleStates;
-                const currentRegion = currentActiveSampleId && currentSampleStates[currentActiveSampleId] 
-                    ? currentSampleStates[currentActiveSampleId].region 
+                const currentRegion = currentActiveSampleId && currentSampleStates[currentActiveSampleId]
+                    ? currentSampleStates[currentActiveSampleId].region
                     : { start: 0, end: 1 };
                 const currentChops = currentActiveSampleId && currentSampleStates[currentActiveSampleId]
                     ? currentSampleStates[currentActiveSampleId].chops
@@ -331,7 +397,7 @@ export default function App() {
                 const currentActiveChopId = currentActiveSampleId && currentSampleStates[currentActiveSampleId]
                     ? currentSampleStates[currentActiveSampleId].activeChopId
                     : null;
-                
+
                 if (currentLoopState && activeSample?.buffer) {
                     // Loop is ON - restart playback at the crop/region start
                     // We handle looping manually (not using AudioBufferSourceNode loop)
@@ -341,7 +407,7 @@ export default function App() {
                             const chopToUse = currentActiveChopId && activeTab === TabView.CHOP
                                 ? currentChops.find(c => c.id === currentActiveChopId)
                                 : null;
-                            
+
                             const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
                             if (chopToUse && activeSample.buffer) {
                                 engine.play(activeSample.buffer, chopToUse.start, chopToUse.end, true, playbackRate);
@@ -396,7 +462,7 @@ export default function App() {
 
             const duration = activeSample.buffer.duration;
             const playbackRate = engine.currentPlaybackRate || 1.0;
-            
+
             // Determine which region is actually being played
             let actualRegionDuration: number;
             if (activeChopId && activeTab === TabView.CHOP) {
@@ -414,7 +480,7 @@ export default function App() {
             if (engine.playbackStartTime > 0) {
                 const elapsed = engine.context.currentTime - engine.playbackStartTime;
                 const playbackRate = engine.currentPlaybackRate || 1.0;
-                
+
                 // Determine which region is actually playing
                 let actualRegionStart: number;
                 let actualRegionEnd: number;
@@ -432,15 +498,15 @@ export default function App() {
                     actualRegionEnd = duration * region.end;
                 }
                 const actualRegionDuration = actualRegionEnd - actualRegionStart;
-                
+
                 // Calculate buffer time elapsed (real-time * playbackRate)
                 const bufferTimeElapsed = elapsed * playbackRate;
-                
+
                 // Calculate current position in the buffer
                 // If looping (either normal playback or preview with loop enabled), wrap the position back to start when it exceeds the end
                 const isCurrentlyLooping = isLooping && engine.isLooping;
                 let bufferPosition: number;
-                
+
                 if (isCurrentlyLooping) {
                     // Wrap position within the region boundaries
                     bufferPosition = actualRegionStart + (bufferTimeElapsed % actualRegionDuration);
@@ -451,7 +517,7 @@ export default function App() {
                         bufferPosition = actualRegionEnd;
                     }
                 }
-                
+
                 // Current position relative to the region being played
                 const currentPos = isCurrentlyLooping
                     ? (bufferPosition - actualRegionStart) // Position within the loop cycle
@@ -479,22 +545,22 @@ export default function App() {
             prevStretchRatioRef.current = timeStretchRatio;
             return;
         }
-        
+
         // Only restart if ratio actually changed
         if (prevStretchRatioRef.current === timeStretchRatio) {
             return;
         }
-        
+
         // Cancel any pending restart to prevent overlapping restarts
         if (restartTimeoutRef.current) {
             clearTimeout(restartTimeoutRef.current);
             restartTimeoutRef.current = null;
         }
-        
+
         // Explicitly stop current playback first to prevent overlapping sources
         // This ensures the previous source is fully stopped before starting a new one
         engine.stop();
-        
+
         // Small delay to ensure stop() completes before starting new playback
         // This prevents race conditions where multiple sources might play simultaneously
         restartTimeoutRef.current = setTimeout(() => {
@@ -502,15 +568,15 @@ export default function App() {
             const elapsed = engine.context.currentTime - engine.playbackStartTime;
             const playbackRate = engine.currentPlaybackRate || 1.0;
             const bufferTimeElapsed = elapsed * playbackRate;
-            
+
             // Calculate position relative to region start
             const bufferDuration = activeSample.buffer.duration;
             const regionDuration = bufferDuration * (region.end - region.start);
-            
+
             // Calculate position within region, accounting for looping
             // Use modulo to wrap position if it exceeds region duration
             let positionInRegion = bufferTimeElapsed % regionDuration;
-            
+
             // Ensure position is within valid bounds (handle edge cases)
             if (positionInRegion < 0) {
                 positionInRegion = 0;
@@ -518,21 +584,21 @@ export default function App() {
             if (positionInRegion > regionDuration) {
                 positionInRegion = regionDuration;
             }
-            
+
             // Calculate normalized position (0-1) within the full buffer
             const currentPositionInBuffer = region.start * bufferDuration + positionInRegion;
             const currentPosition = Math.max(region.start, Math.min(currentPositionInBuffer / bufferDuration, region.end));
-            
+
             // Restart playback from current position with new ratio
             // CRITICAL: Always use region.start and region.end for loop boundaries, not currentPosition
             // This prevents tiny loops when currentPosition is close to region.start
             const newPlaybackRate = 1 / timeStretchRatio;
             const originalOnPlaybackEnded = engine.onPlaybackEnded;
             engine.onPlaybackEnded = null;
-            
+
             // Get current loop state from store
             const currentLoopState = usePlaybackStore.getState().isLooping;
-            
+
             // Always use full region boundaries for loop points to prevent tiny loops
             // The AudioEngine.play() method uses trimStart/trimEnd as loop boundaries when looping is enabled
             // By always using region.start and region.end, we ensure consistent loop boundaries
@@ -542,11 +608,11 @@ export default function App() {
             // 3. Restarting from region.start prevents the looping bug
             // The slight position loss is acceptable compared to the looping bug
             engine.play(activeSample.buffer, region.start, region.end, currentLoopState, newPlaybackRate);
-            
+
             // Calculate new stretched duration based on full region
             const remainingBufferDuration = bufferDuration * (region.end - region.start);
             const remainingStretchedDuration = remainingBufferDuration / newPlaybackRate;
-            
+
             // Handle playback end based on loop state
             if (currentLoopState) {
                 // If looping, restore callback so it can handle looping
@@ -561,12 +627,12 @@ export default function App() {
                     }
                 }, remainingStretchedDuration * 1000);
             }
-            
+
             // Update ref to track current ratio
             prevStretchRatioRef.current = timeStretchRatio;
             restartTimeoutRef.current = null;
         }, 10); // Small delay to ensure stop() completes
-        
+
         return () => {
             if (restartTimeoutRef.current) {
                 clearTimeout(restartTimeoutRef.current);
@@ -582,35 +648,35 @@ export default function App() {
             prevTimeStretchEnabledRef.current = timeStretchEnabled;
             return;
         }
-        
+
         // Only restart if enabled state actually changed
         if (prevTimeStretchEnabledRef.current === timeStretchEnabled) {
             return;
         }
-        
+
         // Cancel any pending restart to prevent overlapping restarts
         if (restartTimeoutRef.current) {
             clearTimeout(restartTimeoutRef.current);
             restartTimeoutRef.current = null;
         }
-        
+
         // Explicitly stop current playback first
         engine.stop();
-        
+
         // Small delay to ensure stop() completes before starting new playback
         restartTimeoutRef.current = setTimeout(() => {
             // Calculate current playback position within the region
             const elapsed = engine.context.currentTime - engine.playbackStartTime;
             const playbackRate = engine.currentPlaybackRate || 1.0;
             const bufferTimeElapsed = elapsed * playbackRate;
-            
+
             // Calculate position relative to region start
             const bufferDuration = activeSample.buffer.duration;
             const regionDuration = bufferDuration * (region.end - region.start);
-            
+
             // Calculate position within region, accounting for looping
             let positionInRegion = bufferTimeElapsed % regionDuration;
-            
+
             // Ensure position is within valid bounds
             if (positionInRegion < 0) {
                 positionInRegion = 0;
@@ -618,31 +684,31 @@ export default function App() {
             if (positionInRegion > regionDuration) {
                 positionInRegion = regionDuration;
             }
-            
+
             // Calculate normalized position (0-1) within the full buffer
             const currentPositionInBuffer = region.start * bufferDuration + positionInRegion;
             const currentPosition = Math.max(region.start, Math.min(currentPositionInBuffer / bufferDuration, region.end));
-            
+
             // Calculate playback rate based on new enabled state
             const newPlaybackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
             const originalOnPlaybackEnded = engine.onPlaybackEnded;
             engine.onPlaybackEnded = null;
-            
+
             // Get current loop state from store
             const currentLoopState = usePlaybackStore.getState().isLooping;
-            
+
             // Restart playback from region start with new playback rate
             // Always use full region boundaries for loop points
             engine.play(activeSample.buffer, region.start, region.end, currentLoopState, newPlaybackRate);
-            
+
             // Restore callback
             engine.onPlaybackEnded = originalOnPlaybackEnded;
-            
+
             // Update ref to track current enabled state
             prevTimeStretchEnabledRef.current = timeStretchEnabled;
             restartTimeoutRef.current = null;
         }, 10); // Small delay to ensure stop() completes
-        
+
         return () => {
             if (restartTimeoutRef.current) {
                 clearTimeout(restartTimeoutRef.current);
@@ -654,10 +720,10 @@ export default function App() {
     // Sync stretch ratio to tempo when target tempo changes
     useEffect(() => {
         if (!syncToTempo || !targetTempo || !activeSample) return;
-        
-        const sampleBPM = typeof activeSample.bpm === 'number' ? activeSample.bpm : 
-                         activeSample.detectedBPM || null;
-        
+
+        const sampleBPM = typeof activeSample.bpm === 'number' ? activeSample.bpm :
+            activeSample.detectedBPM || null;
+
         if (sampleBPM && sampleBPM > 0 && targetTempo > 0) {
             // stretchRatio = sampleBPM / targetBPM
             // Higher target tempo = faster playback = lower stretchRatio
@@ -673,6 +739,47 @@ export default function App() {
             engine.threshold = recThreshold;
         }
     }, [recThreshold, engine]);
+
+    // Auto-enable EQ when controls are moved (but don't auto-disable - user must use On/Off button)
+    useEffect(() => {
+        // Check if any control is moved from default
+        const hasNonZeroGain = lowGain !== 0 || midGain !== 0 || highGain !== 0;
+        const hasNonDefaultFreq = lowFreq !== 100 || midFreq !== 1000 || highFreq !== 8000;
+        const hasNonDefaultQ = midQ !== 1.2;
+
+        const shouldBeEnabled = hasNonZeroGain || hasNonDefaultFreq || hasNonDefaultQ;
+
+        // Only auto-enable when controls are moved while disabled
+        // Don't auto-disable - user must explicitly turn off via On/Off button
+        // Only check enabled state, don't include it in dependencies to avoid re-triggering on manual toggle
+        const currentEnabled = usePlaybackStore.getState().eqSettings.enabled;
+        if (shouldBeEnabled && !currentEnabled) {
+            setEQEnabled(true);
+        }
+        // Removed auto-disable logic - user controls this via On/Off button
+    }, [lowGain, midGain, highGain, lowFreq, midFreq, highFreq, midQ, setEQEnabled]);
+
+    // Auto-enable Time Stretch when ratio is changed (but don't auto-disable - user must use On/Off button)
+    useEffect(() => {
+        // Check if ratio is changed from default (1.0)
+        const shouldBeEnabled = timeStretchRatio !== 1.0;
+
+        // Only auto-enable when ratio is changed while disabled
+        // Don't auto-disable - user must explicitly turn off via On/Off button
+        // Only check enabled state, don't include it in dependencies to avoid re-triggering on manual toggle
+        const currentEnabled = usePlaybackStore.getState().timeStretchEnabled;
+        if (shouldBeEnabled && !currentEnabled) {
+            setTimeStretchEnabled(true);
+        }
+        // Removed auto-disable logic - user controls this via On/Off button
+    }, [timeStretchRatio, setTimeStretchEnabled]);
+
+    // Reset noise gate when switching samples (for clean pass-through)
+    useEffect(() => {
+        setNoiseGateEnabled(false);
+        setLiveNoiseSensitivity(0.5);
+        setLiveNoiseAmount(0.5);
+    }, [activeSampleId]);
 
     // Sync EQ parameters to AudioEngine (live updates)
     useEffect(() => {
@@ -699,7 +806,7 @@ export default function App() {
     // Handle region changes during playback - restart playback with new region
     const prevRegionRef = useRef<Region>({ start: region.start, end: region.end });
     const isInitialMountRef = useRef(true);
-    
+
     useEffect(() => {
         // Skip on initial mount
         if (isInitialMountRef.current) {
@@ -707,39 +814,199 @@ export default function App() {
             prevRegionRef.current = { start: region.start, end: region.end };
             return;
         }
-        
+
         // Check if region actually changed
-        const regionChanged = prevRegionRef.current.start !== region.start || 
-                              prevRegionRef.current.end !== region.end;
-        
+        const regionChanged = prevRegionRef.current.start !== region.start ||
+            prevRegionRef.current.end !== region.end;
+
         // Only restart if region actually changed and we're currently playing
         if (regionChanged && engine && engine.activeSource && isPlaying && activeSample?.buffer && activeTab !== TabView.CHOP) {
             // Restart playback with new region boundaries
             // This is especially important for looping - loop boundaries need to be updated
             engine.stop();
             setPlaying(false);
-            // Restart with new region boundaries (loop will respect these new boundaries)
-            setTimeout(() => {
-                if (activeSample.buffer && !engine.activeSource) {
-                    const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
-                    engine.play(activeSample.buffer, region.start, region.end, isLooping, playbackRate);
-                    setPlaying(true);
-                }
-            }, 10);
+
+            // Restart immediately (Debounce removed for responsiveness)
+            if (activeSample.buffer && !engine.activeSource && document.visibilityState === 'visible') {
+                const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
+                engine.play(activeSample.buffer, region.start, region.end, isLooping, playbackRate);
+                setPlaying(true);
+            }
         }
-        
-        // Update ref for next comparison
-        prevRegionRef.current = { start: region.start, end: region.end };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [region.start, region.end]);
 
-    const toggleRecord = () => {
-        if (isRecording) {
-            stopRecording();
+    // Mute/unmute source tab functions
+    const muteSourceTab = async (tabId: number): Promise<boolean> => {
+        if (!chrome?.tabs) {
+            console.error('[App] chrome.tabs API not available');
+            return false;
+        }
+        return new Promise((resolve) => {
+            try {
+                chrome.tabs!.update(tabId, { muted: true }, (tab) => {
+                    if (chrome.runtime?.lastError) {
+                        console.error('[App] Error muting tab:', chrome.runtime.lastError.message);
+                        resolve(false);
+                    } else {
+                        console.log(`[App] Tab ${tabId} muted successfully`, tab);
+                        resolve(true);
+                    }
+                });
+            } catch (err) {
+                console.error('[App] Error muting tab:', err);
+                resolve(false);
+            }
+        });
+    };
+
+    const unmuteSourceTab = async (tabId: number): Promise<boolean> => {
+        if (!chrome?.tabs) {
+            console.error('[App] chrome.tabs API not available');
+            return false;
+        }
+        return new Promise((resolve) => {
+            try {
+                chrome.tabs!.update(tabId, { muted: false }, (tab) => {
+                    if (chrome.runtime?.lastError) {
+                        console.error('[App] Error unmuting tab:', chrome.runtime.lastError.message);
+                        resolve(false);
+                    } else {
+                        console.log(`[App] Tab ${tabId} unmuted successfully`, tab);
+                        resolve(true);
+                    }
+                });
+            } catch (err) {
+                console.error('[App] Error unmuting tab:', err);
+                resolve(false);
+            }
+        });
+    };
+
+    // Helper function to mute tab before starting recording (used by both record button and threshold)
+    const muteBeforeRecording = async (): Promise<void> => {
+        if (!chrome?.tabs || !muteSourceDuringRecording) return;
+        
+        let tabIdToMute: number | null = null;
+        
+        // First try to use sourceTabId if we have it
+        if (sourceTabId !== null) {
+            tabIdToMute = sourceTabId;
         } else {
+            // Try to get tab ID from URL parameter
+            const urlParams = new URLSearchParams(window.location.search);
+            const targetTabIdParam = urlParams.get('targetTabId');
+            if (targetTabIdParam) {
+                const tabId = parseInt(targetTabIdParam, 10);
+                if (!isNaN(tabId)) {
+                    tabIdToMute = tabId;
+                    setSourceTabId(tabId);
+                }
+            }
+        }
+        
+        // Mute the tab if we have a valid ID
+        if (tabIdToMute !== null) {
+            console.log(`[App] Muting tab ${tabIdToMute} before starting recording`);
+            await muteSourceTab(tabIdToMute);
+        } else {
+            console.warn('[App] Cannot mute: no tab ID available. Make sure to click extension icon on the tab you want to record.');
+        }
+    };
+
+    // Unmute tab when recording stops (only if mute was enabled)
+    useEffect(() => {
+        if (!isRecording && sourceTabId !== null && muteSourceDuringRecording) {
+            // Recording stopped - unmute the tab if it was muted
+            console.log(`[App] Recording stopped, unmuting tab ${sourceTabId}`);
+            unmuteSourceTab(sourceTabId);
+            // Don't clear sourceTabId - keep it for next recording
+        }
+    }, [isRecording, sourceTabId, muteSourceDuringRecording]);
+
+    const toggleRecord = async () => {
+        if (isRecording) {
+            // Stop recording and unmute tab if it was muted
+            stopRecording();
+            if (sourceTabId !== null && muteSourceDuringRecording) {
+                console.log(`[App] Stopping recording, unmuting tab ${sourceTabId}`);
+                await unmuteSourceTab(sourceTabId);
+                // Don't clear sourceTabId - keep it for next recording
+            }
+        } else {
+            // Start recording - mute source tab if mute is enabled
+            await muteBeforeRecording();
+            
+            // Reset all effects before starting a new recording to ensure clean sample
+            usePlaybackStore.getState().resetEffects();
+            setNoiseGateEnabled(false);
+            setLiveNoiseSensitivity(0.5);
+            setLiveNoiseAmount(0.5);
             startRecording();
         }
     };
+
+    // Wrapper for startRecording that resets effects to ensure clean recording
+    const handleStartRecording = async () => {
+        // Mute tab before starting recording if mute is enabled
+        await muteBeforeRecording();
+        
+        // Reset all effects before starting a new recording to ensure clean sample
+        usePlaybackStore.getState().resetEffects();
+        setNoiseGateEnabled(false);
+        setLiveNoiseSensitivity(0.5);
+        setLiveNoiseAmount(0.5);
+        startRecording();
+    };
+
+    // Helper function to restart playback with current settings
+    const restartPlaybackIfPlaying = useCallback(() => {
+        if (!isPlaying || !activeSample?.buffer || !engine) return;
+
+        // Prevent multiple simultaneous restarts - cancel any pending restart and start fresh
+        if (noiseGateRestartTimeoutRef.current) {
+            clearTimeout(noiseGateRestartTimeoutRef.current);
+            noiseGateRestartTimeoutRef.current = null;
+        }
+
+        // If already in the process of restarting, cancel it and start fresh
+        if (isRestartingNoiseGateRef.current) {
+            // Stop any playback that might have started
+            engine.stop();
+        }
+
+        isRestartingNoiseGateRef.current = true;
+        const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
+
+        // Stop current playback
+        engine.stop();
+
+        // Small delay to ensure stop completes, but also double-check no active source exists
+        noiseGateRestartTimeoutRef.current = setTimeout(() => {
+            // Double-check we're still supposed to be playing
+            if (!isPlaying || !activeSample?.buffer) {
+                isRestartingNoiseGateRef.current = false;
+                noiseGateRestartTimeoutRef.current = null;
+                return;
+            }
+
+            // Safety check: if there's still an active source, stop it again
+            if (engine.activeSource) {
+                engine.stop();
+            }
+
+            if (activeChopId && activeTab === TabView.CHOP) {
+                const chop = chops.find(c => c.id === activeChopId);
+                if (chop && activeSample.buffer) {
+                    engine.play(activeSample.buffer, chop.start, chop.end, isLooping, playbackRate);
+                }
+            } else {
+                engine.play(activeSample.buffer, region.start, region.end, isLooping, playbackRate);
+            }
+            isRestartingNoiseGateRef.current = false;
+            noiseGateRestartTimeoutRef.current = null;
+        }, 10);
+    }, [isPlaying, activeSample, engine, timeStretchEnabled, timeStretchRatio, activeChopId, activeTab, chops, isLooping, region]);
 
     const handlePlayToggle = () => {
         if (!activeSample) return;
@@ -751,7 +1018,7 @@ export default function App() {
             if (engine && activeSample.buffer) {
                 // Calculate playback rate based on time-stretch enabled state
                 const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
-                
+
                 // Use current loop state from store - respect user's loop preference
                 // If there's an active chop, play that; otherwise play the region
                 if (activeChopId && activeTab === TabView.CHOP) {
@@ -860,135 +1127,260 @@ export default function App() {
         }
     };
 
-    const downloadBlob = (blob: Blob, filename: string) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+    // downloadBlob replaced with downloadBlobWithPreference from downloadUtils
+
+    const handleSaveAs = (id: string) => {
+        // Show export dialog instead of directly exporting
+        setExportDialog({
+            isOpen: true,
+            mode: 'save-selected',
+            sampleId: id
+        });
     };
 
-    const handleSaveAs = async (id: string) => {
-        // If saving the active sample and a chop is selected, save ONLY that chop
-        if (id === activeSampleId && activeChopId) {
-            const chop = chops.find(c => c.id === activeChopId);
-            const sample = samples.find(s => s.id === id);
-
-            if (chop && sample && sample.buffer && engine) {
-                const tempStub = {
-                    buffer: sample.buffer,
-                    trimStart: chop.start,
-                    trimEnd: chop.end
-                };
-                const newBuffer = await engine.crop(tempStub);
-                if (newBuffer) {
-                    const blob = audioBufferToWav(newBuffer);
-                    const originalName = sample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
-                    const chopIndex = chops.findIndex(c => c.id === activeChopId) + 1;
-                    downloadBlob(blob, `${originalName}_Slice_${chopIndex}.wav`);
-                    return;
-                }
-            }
+    const performSaveAs = async (id: string, format: ExportDialogFormat, sampleRate: ExportSampleRate, bitrate?: MP3Bitrate) => {
+        if (!engine) {
+            alert('Error: Audio engine is not available. Please refresh the page.');
+            return;
         }
 
-        const targets = new Set(selectedSampleIds);
-        let idsToSave = (targets.size > 0 && targets.has(id)) ? Array.from(targets) : [id];
+        try {
+            // Get effective sample rate
+            const targetSampleRate = sampleRate === 'original' 
+                ? null 
+                : sampleRate;
 
-        if (idsToSave.length === 1) {
-            const sample = samples.find(s => s.id === idsToSave[0]);
-            if (sample && sample.buffer) {
-                const blob = audioBufferToWav(sample.buffer);
-                downloadBlob(blob, sample.name);
+            // If saving the active sample and a chop is selected, save ONLY that chop
+            if (id === activeSampleId && activeChopId) {
+                const chop = chops.find(c => c.id === activeChopId);
+                const sample = samples.find(s => s.id === id);
+
+                if (chop && sample && sample.buffer && engine) {
+                    const tempStub = {
+                        buffer: sample.buffer,
+                        trimStart: chop.start,
+                        trimEnd: chop.end
+                    };
+                    let newBuffer = await engine.crop(tempStub);
+                    if (newBuffer) {
+                        // Resample if needed
+                        if (targetSampleRate && newBuffer.sampleRate !== targetSampleRate) {
+                            newBuffer = await engine.resampleBuffer(newBuffer, targetSampleRate);
+                        }
+                        const blob = await audioBufferToFormat(newBuffer, format, { bitrate });
+                        const originalName = sample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+                        const chopIndex = chops.findIndex(c => c.id === activeChopId) + 1;
+                        const filename = `${originalName}_Slice_${chopIndex}.${format}`;
+                        await downloadBlobWithPreference(blob, filename);
+                        return;
+                    }
+                }
             }
-        } else {
-            const zip = new JSZip();
-            const folder = zip.folder("uSampler_Selection");
+
+            const targets = new Set(selectedSampleIds);
+            let idsToSave = (targets.size > 0 && targets.has(id)) ? Array.from(targets) : [id];
+
+            // Export individual files (no ZIP for save-selected mode)
+            let exportedCount = 0;
+            let failedCount = 0;
+            const exportedFiles: string[] = [];
 
             for (const tid of idsToSave) {
                 const sample = samples.find(s => s.id === tid);
                 if (sample && sample.buffer) {
-                    const blob = audioBufferToWav(sample.buffer);
-                    folder?.file(sample.name, blob);
+                    try {
+                        let buffer = sample.buffer;
+                        // Resample if needed
+                        if (targetSampleRate && buffer.sampleRate !== targetSampleRate) {
+                            buffer = await engine.resampleBuffer(buffer, targetSampleRate);
+                        }
+                        const blob = await audioBufferToFormat(buffer, format, { bitrate });
+                        const nameWithoutExt = sample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+                        const filename = `${nameWithoutExt}.${format}`;
+                        await downloadBlobWithPreference(blob, filename);
+                        exportedFiles.push(filename);
+                        exportedCount++;
+                    } catch (error) {
+                        console.error(`[App] Failed to export sample "${sample.name}":`, error);
+                        failedCount++;
+                    }
+                } else {
+                    failedCount++;
                 }
             }
 
-            const content = await zip.generateAsync({ type: "blob" });
-            downloadBlob(content, "uSampler_Selection.zip");
+            if (exportedCount === 0) {
+                const errorMsg = format === 'mp3' 
+                    ? 'MP3 export failed. All samples may be invalid, missing audio buffers, or MP3 encoding may have failed. Check console for details.'
+                    : 'No samples could be exported. All samples may be invalid or missing audio buffers.';
+                throw new Error(errorMsg);
+            }
+
+            // Success - downloads sidebar will show the files
+        } catch (error) {
+            console.error('[App] Export error:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+            alert(`Export failed: ${errorMessage}\n\nPlease check the console for more details.`);
         }
     };
 
-    const handleExportAll = async () => {
+    const handleExportAll = () => {
         if (samples.length === 0) return;
-
-        const zip = new JSZip();
-        const dateStr = new Date().toISOString().slice(0, 10);
-        const folder = zip.folder(`uSampler_Session_${dateStr}`);
-
-        samples.forEach(sample => {
-            if (sample.buffer) {
-                const blob = audioBufferToWav(sample.buffer);
-                folder?.file(sample.name, blob);
-            }
+        // Show export dialog instead of directly exporting
+        setExportDialog({
+            isOpen: true,
+            mode: 'export-all'
         });
+    };
 
-        const metadata = {
-            version: DEV_VERSION,
-            date: new Date().toISOString(),
-            samples: samples.map(s => ({
-                id: s.id,
-                name: s.name,
-                duration: s.duration,
-                bpm: s.bpm,
-                chops: s.chops
-            }))
+    const performExportAll = async (format: ExportDialogFormat, sampleRate: ExportSampleRate, bitrate?: MP3Bitrate, exportAsZip?: boolean) => {
+        if (samples.length === 0) {
+            alert('No samples to export.');
+            return;
+        }
+
+        if (!engine) {
+            alert('Error: Audio engine is not available. Please refresh the page.');
+            return;
+        }
+
+        try {
+            // Get effective sample rate
+            const targetSampleRate = sampleRate === 'original' 
+                ? null 
+                : sampleRate;
+
+            // Use default uSampler folder
+
+            if (exportAsZip) {
+                // Export as ZIP (existing logic)
+                const zip = new JSZip();
+                const dateStr = new Date().toISOString().slice(0, 10);
+                const folder = zip.folder(`uSampler_Session_${dateStr}`);
+
+                let exportedCount = 0;
+                for (const sample of samples) {
+                    if (sample.buffer) {
+                        try {
+                            let buffer = sample.buffer;
+                            // Resample if needed
+                            if (targetSampleRate && buffer.sampleRate !== targetSampleRate) {
+                                buffer = await engine.resampleBuffer(buffer, targetSampleRate);
+                            }
+                            const blob = await audioBufferToFormat(buffer, format, { bitrate });
+                            const nameWithoutExt = sample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+                            folder?.file(`${nameWithoutExt}.${format}`, blob);
+                            exportedCount++;
+                        } catch (error) {
+                            console.error(`[App] Failed to export sample "${sample.name}":`, error);
+                            // Continue with other samples even if one fails
+                        }
+                    }
+                }
+
+                if (exportedCount === 0) {
+                    const errorMsg = format === 'mp3' 
+                        ? 'MP3 export failed. All samples may be invalid, missing audio buffers, or MP3 encoding may have failed. Check console for details.'
+                        : 'No samples could be exported. All samples may be invalid or missing audio buffers.';
+                    throw new Error(errorMsg);
+                }
+
+                const metadata = {
+                    version: DEV_VERSION,
+                    date: new Date().toISOString(),
+                    samples: samples.map(s => ({
+                        id: s.id,
+                        name: s.name,
+                        duration: s.duration,
+                        bpm: s.bpm,
+                        chops: s.chops
+                    }))
+                };
+                folder?.file("session_data.json", JSON.stringify(metadata, null, 2));
+
+                const content = await zip.generateAsync({ type: "blob" });
+                const zipFilename = `uSampler_Session_${dateStr}.zip`;
+                await downloadBlobWithPreference(content, zipFilename);
+            } else {
+                // Export individual files (default)
+                let exportedCount = 0;
+                let failedCount = 0;
+                const exportedFiles: string[] = [];
+                
+                for (const sample of samples) {
+                    if (sample.buffer) {
+                        try {
+                            let buffer = sample.buffer;
+                            // Resample if needed
+                            if (targetSampleRate && buffer.sampleRate !== targetSampleRate) {
+                                buffer = await engine.resampleBuffer(buffer, targetSampleRate);
+                            }
+                            const blob = await audioBufferToFormat(buffer, format, { bitrate });
+                            const nameWithoutExt = sample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+                            const filename = `${nameWithoutExt}.${format}`;
+                            await downloadBlobWithPreference(blob, filename);
+                            exportedFiles.push(filename);
+                            exportedCount++;
+                        } catch (error) {
+                            console.error(`[App] Failed to export sample "${sample.name}":`, error);
+                            failedCount++;
+                            // Continue with other samples even if one fails
+                        }
+                    } else {
+                        failedCount++;
+                    }
+                }
+
+                if (exportedCount === 0) {
+                    const errorMsg = format === 'mp3' 
+                        ? 'MP3 export failed. All samples may be invalid, missing audio buffers, or MP3 encoding may have failed. Check console for details.'
+                        : 'No samples could be exported. All samples may be invalid or missing audio buffers.';
+                    throw new Error(errorMsg);
+                }
+
+                // Success - downloads sidebar will show the files
+            }
+        } catch (error) {
+            console.error('[App] Export All error:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+            alert(`Export All failed: ${errorMessage}\n\nPlease check the console for more details.`);
+        }
+    };
+
+
+    // Live Noise Gate Effect - Apply immediately when controls change
+    useEffect(() => {
+        if (!engine) return;
+
+        const prevSettings = prevNoiseGateSettingsRef.current;
+        const settingsChanged =
+            prevSettings.enabled !== noiseGateEnabled ||
+            Math.abs(prevSettings.sensitivity - liveNoiseSensitivity) > 0.001 ||
+            Math.abs(prevSettings.amount - liveNoiseAmount) > 0.001;
+
+
+        // Update engine with new settings
+        (engine as any).setNoiseGate(noiseGateEnabled, liveNoiseSensitivity, liveNoiseAmount);
+
+        // Only restart playback if enabled state changed (to add/remove node from chain)
+        // Sensitivity and amount changes apply in real-time via the processor callback
+        const enabledChanged = prevSettings.enabled !== noiseGateEnabled;
+
+
+        // Restart playback if currently playing and enabled state changed
+        // The noise gate node is only connected in the audio chain when playback starts,
+        // so we need to restart to add/remove it from the chain
+        if (enabledChanged && isPlaying && activeSample?.buffer) {
+            restartPlaybackIfPlaying();
+        }
+
+        // Update ref
+        prevNoiseGateSettingsRef.current = {
+            enabled: noiseGateEnabled,
+            sensitivity: liveNoiseSensitivity,
+            amount: liveNoiseAmount
         };
-        folder?.file("session_data.json", JSON.stringify(metadata, null, 2));
-
-        const content = await zip.generateAsync({ type: "blob" });
-        downloadBlob(content, `uSampler_Session_${dateStr}.zip`);
-    };
-
-    const handleShare = async () => {
-        const idsToShare = selectedSampleIds.size > 0 ? Array.from(selectedSampleIds) : activeSampleId ? [activeSampleId] : samples.map(s => s.id);
-        if (idsToShare.length === 0) return;
-
-        const files: File[] = [];
-        for (const tid of idsToShare) {
-            const sample = samples.find(s => s.id === tid);
-            if (sample && sample.buffer) {
-                const blob = audioBufferToWav(sample.buffer);
-                files.push(new File([blob], sample.name, { type: 'audio/wav' }));
-            }
-        }
-
-        if (files.length === 0) return;
-
-        if (navigator.canShare && navigator.canShare({ files })) {
-            try {
-                await navigator.share({
-                    files,
-                    title: 'uSampler Export',
-                    text: `Sharing ${files.length} samples from uSampler`
-                });
-                return;
-            } catch (err) {
-                console.log('Share failed', err);
-            }
-        }
-
-        if (idsToShare.length > 1) {
-            const zip = new JSZip();
-            const folder = zip.folder("uSampler_Share");
-            files.forEach(f => folder?.file(f.name, f));
-            const content = await zip.generateAsync({ type: "blob" });
-            downloadBlob(content, "uSampler_Share.zip");
-        } else {
-            downloadBlob(files[0], files[0].name);
-        }
-    };
+    }, [engine, noiseGateEnabled, liveNoiseSensitivity, liveNoiseAmount, isPlaying, activeSample, restartPlaybackIfPlaying]);
 
     const handleCrop = async () => {
         if (!activeSample || !engine) return;
@@ -1034,6 +1426,42 @@ export default function App() {
         });
     };
 
+    const handleApplyNoiseReduction = async () => {
+        if (!activeSample || !engine || !activeSample.buffer) return;
+
+        // Use the offline version of the gate to bake the effect
+        // Cast to any because TS might not see the new method yet
+        const newBuffer = (engine as any).applyNoiseGateOffline(activeSample.buffer, liveNoiseSensitivity, liveNoiseAmount);
+
+        if (newBuffer) {
+            const newBlob = engine.bufferToBlob(newBuffer);
+            const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
+            const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
+            const newName = `${originalName}_Denoised.${extension}`;
+
+            const newSample: Sample = {
+                id: Date.now().toString(),
+                name: newName,
+                duration: formatDuration(newBuffer.duration),
+                bpm: activeSample.bpm,
+                size: `${(newBlob.size / 1024 / 1024).toFixed(2)} MB`,
+                waveform: [],
+                tags: ['Denoised', ...activeSample.tags.filter(t => t !== 'New')],
+                buffer: newBuffer,
+                blob: newBlob,
+                trimStart: 0,
+                trimEnd: 1
+            };
+            setSamples(prev => [newSample, ...prev]);
+            setActiveSample(newSample.id);
+
+            // Reset noise gate state after baking to prevent double application
+            setNoiseGateEnabled(false);
+            setLiveNoiseSensitivity(0.5);
+            setLiveNoiseAmount(0.5);
+        }
+    };
+
     const handleNormalize = async () => {
         if (!activeSample || !engine) return;
 
@@ -1070,6 +1498,8 @@ export default function App() {
             }
         });
     };
+
+
 
 
     const handleSetChopsLinked = (linked: boolean) => {
@@ -1161,21 +1591,21 @@ export default function App() {
             }
             return;
         }
-        
+
         // Check if this sample has been manually edited - if so, don't auto-regenerate
         if (activeSampleId && manuallyEditedChops.has(activeSampleId)) {
             // Sample has been manually edited - don't overwrite
             return;
         }
-        
+
         // Use async detection with BPM information
         (async () => {
             try {
                 const detectedBPM = activeSample.detectedBPM || null;
                 const bpmConfidence = activeSample.detectedBPM ? 0.8 : 0;
-                
+
                 const chopPoints = await engine.detectTransients(
-                    activeSample.buffer!, 
+                    activeSample.buffer!,
                     chopThreshold,
                     {
                         detectedBPM,
@@ -1183,7 +1613,7 @@ export default function App() {
                         bpmWeight: bpmWeight !== null ? bpmWeight : undefined
                     }
                 );
-                
+
                 const newChops = convertChopPointsToChops(chopPoints, activeSample.buffer!);
                 if (activeSampleId) {
                     setChops(activeSampleId, newChops);
@@ -1207,7 +1637,7 @@ export default function App() {
             }
         })();
     }, [chopThreshold, bpmWeight, autoChoppingEnabled, chopSubTab, activeTab, engine, activeSample?.buffer, activeSample?.detectedBPM, activeSampleId, activeChopId, manuallyEditedChops]);
-    
+
     // Clear manual edit flag when auto chop controls change (allows regeneration)
     useEffect(() => {
         if (activeSampleId && autoChoppingEnabled && chopSubTab === 'auto') {
@@ -1231,7 +1661,7 @@ export default function App() {
                     return updated;
                 });
             }
-            
+
             // Create equal divisions as Chop objects
             const newChops: Chop[] = [];
             const bufferLength = activeSample.buffer!.length;
@@ -1309,7 +1739,7 @@ export default function App() {
 
     // Consolidated Global Spacebar Handler
     useEffect(() => {
-        const handleSpacebar = (e: KeyboardEvent) => {
+        const handleSpacebar = async (e: KeyboardEvent) => {
             if (e.key !== ' ' && e.code !== 'Space') return;
             // Ignore if input focused
             if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
@@ -1321,6 +1751,14 @@ export default function App() {
                 if (isRecording) {
                     stopRecording();
                 } else {
+                    // Mute tab before starting recording if mute is enabled
+                    await muteBeforeRecording();
+                    
+                    // Reset all effects before starting a new recording to ensure clean sample
+                    usePlaybackStore.getState().resetEffects();
+                    setNoiseGateEnabled(false);
+                    setLiveNoiseSensitivity(0.5);
+                    setLiveNoiseAmount(0.5);
                     startRecording();
                 }
                 return;
@@ -1457,7 +1895,8 @@ export default function App() {
                 } else {
                     // Play Selection if Active (Consumer requirement #2)
                     const playbackRate = timeStretchEnabled ? (1 / timeStretchRatio) : 1.0;
-                    if (activeChopId && !manualChoppingEnabled) {
+                    // Only play chops when CHOP tab is active
+                    if (activeChopId && !manualChoppingEnabled && activeTab === TabView.CHOP) {
                         const chop = chops.find(c => c.id === activeChopId);
                         if (chop && activeSample.buffer) {
                             setPlaying(true);
@@ -1484,7 +1923,7 @@ export default function App() {
             usePlaybackStore.getState().syncWithEngine(engine);
         }
     }, [engine, isPlaying, isLooping]);
-    
+
     // Reset Chop State on Sample Change
     useEffect(() => {
         // Stop playback and preview when switching samples (Consumer requirement #5)
@@ -1492,7 +1931,7 @@ export default function App() {
             setPlaying(false);
             if (engine) engine.stop();
         }
-        
+
         // Stop any active preview
         // Stop any time-stretch preview if active (legacy cleanup)
         if (isPreviewingStretch) {
@@ -1523,14 +1962,17 @@ export default function App() {
     const hasPendingChanges = () => {
         // Check if region is modified (not full sample)
         const regionModified = region.start !== 0 || region.end !== 1;
-        
+
         // Check if EQ is enabled with non-zero gains
         const eqActive = eqEnabled && (lowGain !== 0 || midGain !== 0 || highGain !== 0);
-        
-        // Note: delay/reverb mix values aren't directly accessible, but they're reset when switching samples
-        // So we mainly check region and EQ
-        
-        return regionModified || eqActive;
+
+        // Check if Noise Gate is enabled
+        const noiseGateActive = noiseGateEnabled;
+
+        // Check if Time Stretch is enabled with non-default ratio
+        const timeStretchActive = timeStretchEnabled && timeStretchRatio !== 1.0;
+
+        return regionModified || eqActive || noiseGateActive || timeStretchActive;
     };
 
     // Check if there's a pending crop (region adjustment)
@@ -1545,14 +1987,14 @@ export default function App() {
             alert('Cannot time stretch: Please select a sample with audio data');
             return;
         }
-        
+
         // Capture all needed data before async operations
         const currentSampleId = activeSample.id;
         let sourceBuffer = activeSample.buffer;
         const currentName = activeSample.name;
         const currentBpm = activeSample.bpm;
         const currentTags = [...activeSample.tags];
-        
+
         // Apply crop first if requested
         if (applyCrop) {
             const tempSampleStub = {
@@ -1569,22 +2011,22 @@ export default function App() {
                 }
             }
         }
-        
-        console.log('Starting time stretch...', { 
+
+        console.log('Starting time stretch...', {
             sampleId: currentSampleId,
             ratio: timeStretchRatio,
             bufferLength: sourceBuffer.length,
             sampleRate: sourceBuffer.sampleRate,
             applyCrop
         });
-        
+
         setTimeStretchProgress(0);
-        setSamples(prevSamples => 
-            prevSamples.map(s => 
+        setSamples(prevSamples =>
+            prevSamples.map(s =>
                 s.id === currentSampleId ? { ...s, isTimeStretching: true } : s
             )
         );
-        
+
         try {
             // Detect BPM before stretching
             let originalBPM: number | null = null;
@@ -1597,10 +2039,10 @@ export default function App() {
             } catch (bpmError) {
                 console.warn('BPM detection failed, continuing without BPM update:', bpmError);
             }
-            
+
             // Calculate new BPM based on stretch ratio
             const newBPM = originalBPM ? originalBPM * timeStretchRatio : currentBpm;
-            
+
             const stretched = await engine.timeStretch(
                 sourceBuffer,
                 timeStretchRatio,
@@ -1608,11 +2050,11 @@ export default function App() {
                     setTimeStretchProgress(progress);
                 }
             );
-            
+
             if (!stretched || !stretched.length) {
                 throw new Error('Time stretch returned invalid buffer');
             }
-            
+
             console.log('Time stretch completed successfully', {
                 originalLength: sourceBuffer.length,
                 stretchedLength: stretched.length,
@@ -1621,13 +2063,13 @@ export default function App() {
                 originalBPM,
                 newBPM
             });
-            
+
             const blob = audioBufferToWav(stretched);
             const originalName = currentName.replace(/\.(wav|mp3|flac|ogg)$/i, '');
             const extension = currentName.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
             const suffix = applyCrop ? '_Cropped_Stretched' : '_Stretched';
             const newName = `${originalName}${suffix}_${timeStretchRatio.toFixed(2)}x.${extension}`;
-            
+
             const newSample: Sample = {
                 id: Date.now().toString(),
                 name: newName,
@@ -1642,39 +2084,36 @@ export default function App() {
                 trimEnd: 1,
                 detectedBPM: typeof newBPM === 'number' ? newBPM : undefined
             };
-            
+
             // Use functional updates to ensure we have the latest state
             setSamples(prevSamples => {
                 // First, clear the isTimeStretching flag from the original sample
-                const updatedSamples = prevSamples.map(s => 
+                const updatedSamples = prevSamples.map(s =>
                     s.id === currentSampleId ? { ...s, isTimeStretching: false } : s
                 );
                 // Then add the new sample at the beginning
                 return [newSample, ...updatedSamples];
             });
-            
+
             // Set the new sample as active
             console.log('Setting new sample as active:', newSample.id, newSample.name);
             setActiveSample(newSample.id);
-            
-            // Reset all effects and preview state when time stretching creates a new sample
+
+            // Reset only time stretch effect after baking (not all effects)
             // This prevents double application when the new stretched sample is played
-            const store = usePlaybackStore.getState();
-            if (engine) {
-                engine.setDelay(0.3, 0.3, 0);
-                engine.setReverb(0.5, 0.5, 0);
-            }
-            store.resetEffects();
+            setTimeStretchEnabled(false);
+            setTimeStretchRatio(1.0);
+            setPreviewingStretch(false);
             prevStretchRatioRef.current = 1.0;
         } catch (error) {
             console.error('Time stretch error:', error);
             const errorMessage = error instanceof Error ? error.message : String(error);
             console.error('Error details:', { error, errorMessage, stack: error instanceof Error ? error.stack : undefined });
             alert(`Time stretch failed: ${errorMessage}\n\nCheck the console for more details.`);
-            
+
             // Clear the isTimeStretching flag on error and preserve active sample
-            setSamples(prevSamples => 
-                prevSamples.map(s => 
+            setSamples(prevSamples =>
+                prevSamples.map(s =>
                     s.id === currentSampleId ? { ...s, isTimeStretching: false } : s
                 )
             );
@@ -1705,7 +2144,7 @@ export default function App() {
                     setRegion(activeSampleId, { start: 0, end: 1 });
                 }
             }
-            
+
             // Apply EQ if enabled
             if (eqEnabled && (lowGain !== 0 || midGain !== 0 || highGain !== 0)) {
                 sourceBuffer = await engine.applyEffectsAndResample(sourceBuffer) || sourceBuffer;
@@ -1748,14 +2187,18 @@ export default function App() {
             setChops(activeSampleId, []); // Clear chops after creating samples
             setActiveChopId(activeSampleId, null);
         }
-        
-        // Reset effects if processing was applied
+
+        // Reset only the effects that were applied (EQ in this case) if processing was applied
         if (applyProcessing) {
-            if (engine) {
-                engine.setDelay(0.3, 0.3, 0);
-                engine.setReverb(0.5, 0.5, 0);
-            }
-            usePlaybackStore.getState().resetEffects();
+            // Only reset EQ since that's what gets applied during chop processing
+            setEQEnabled(false);
+            setLowGain(0);
+            setMidGain(0);
+            setHighGain(0);
+            setLowFreq(100);
+            setMidFreq(1000);
+            setHighFreq(8000);
+            setMidQ(1.2);
         }
     };
 
@@ -1869,108 +2312,176 @@ export default function App() {
     return (
         <div className="h-full w-full bg-black text-white font-sans selection:bg-indigo-500/30 overflow-hidden flex flex-col">
             {/* GLOBAL HEADER */}
-            <header className="h-16 border-b border-zinc-800 flex items-center bg-zinc-950 shrink-0 z-50 relative">
-                {/* LOGO AREA */}
-                <div className="w-72 h-full border-r border-zinc-800 flex items-center justify-between px-6 gap-2 text-indigo-400 shrink-0">
-                    <div className="flex items-center gap-2">
-                        <AudioWaveform className="w-6 h-6" />
-                        <div className="flex flex-col">
-                            <h1 className="font-bold text-lg tracking-tight text-white">uSampler</h1>
-                            <span className="text-[10px] font-bold text-orange-500">DEV v{DEV_VERSION}</span>
+            <header className="h-16 border-b border-zinc-800 flex items-center bg-zinc-950 shrink-0 z-50 relative overflow-hidden">
+                {/* LOGO CONTAINER - Simplified */}
+                <div className="min-w-[180px] w-64 max-w-[240px] h-full border-r border-zinc-800 flex items-center px-4 xl:px-6 gap-2 text-indigo-400 shrink-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                        <Logo size={24} className="shrink-0 xl:w-6 xl:h-6" />
+                        <div className="flex flex-col min-w-0">
+                            <h1 className="font-bold text-base xl:text-lg tracking-tight text-white truncate">uSampler</h1>
                         </div>
                     </div>
-                    <button
-                        onClick={() => {
-                            setActiveSample('');
-                            if (activeSampleId) {
-                                setRegion(activeSampleId, { start: 0, end: 1 });
-                            }
-                            setPlaying(false);
-                            if (engine) engine.stop();
-                            if (activeSampleId) {
-                                setActiveChopId(activeSampleId, null);
-                            }
-                        }}
-                        className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[10px] font-bold tracking-wide uppercase border border-zinc-700 hover:border-indigo-500/50 transition-all"
-                        title="Clear workspace for new sample"
-                    >
-                        New Sample
-                    </button>
                 </div>
 
-                {/* CONTROLS AREA */}
-                <div className="flex-1 flex items-center justify-between px-6 min-w-0 gap-4">
-                    {/* LEFT: Target Source */}
-                    <div className="flex items-center gap-3 shrink">
-                        <div className="flex flex-col">
-                            <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-0.5">Source</span>
-                            <div className="flex items-center gap-2">
-                                <div className="relative group">
+                {/* MAIN CONTROLS AREA - Distinct containers with proper spacing */}
+                <div className="flex-1 flex items-center gap-4 xl:gap-6 px-4 xl:px-6 min-w-0 overflow-x-auto scrollbar-hide">
+                    {/* SOURCE CONTAINER */}
+                    <div className="flex items-center gap-2 xl:gap-3 shrink-0 min-w-0 px-2 xl:px-4">
+                        <div className="flex flex-col min-w-0">
+                            <span className="text-[9px] xl:text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-0.5">Source</span>
+                            <div className="flex items-center gap-1.5 xl:gap-2">
+                                <div className="relative group min-w-0">
                                     <button
                                         onClick={async () => {
+                                            // Disconnect existing source first to allow selecting a new one
+                                            if (engine && engine.sourceNode) {
+                                                engine.sourceNode.disconnect();
+                                                engine.sourceNode = null;
+                                                setIsSourceConnected(false);
+                                            }
+
+                                            // Open source selection dialog
                                             const success = await selectSource();
                                             if (success) {
                                                 setActiveSourceTitle('Display Media');
                                                 setIsSourceConnected(true);
+                                                // Capture tab ID from URL parameter (the tab where extension icon was clicked)
+                                                const urlParams = new URLSearchParams(window.location.search);
+                                                const targetTabIdParam = urlParams.get('targetTabId');
+                                                if (targetTabIdParam && chrome?.tabs) {
+                                                    const tabId = parseInt(targetTabIdParam, 10);
+                                                    if (!isNaN(tabId)) {
+                                                        console.log(`[App] Captured source tab ID from URL: ${tabId}`);
+                                                        setSourceTabId(tabId);
+                                                    }
+                                                } else if (chrome?.tabs && sourceTabId === null) {
+                                                    // Fallback: query active tab (may not be the source tab)
+                                                    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                                                        if (tabs[0]?.id) {
+                                                            console.log(`[App] Captured source tab ID from active tab: ${tabs[0].id}`);
+                                                            setSourceTabId(tabs[0].id);
+                                                        }
+                                                    });
+                                                }
+                                            } else {
+                                                setIsSourceConnected(false);
+                                                // Don't clear sourceTabId - keep it for next connection attempt
                                             }
                                         }}
-                                        className="flex items-center gap-2 text-sm text-zinc-200 hover:text-white font-medium transition-colors"
+                                        className="flex items-center gap-1.5 xl:gap-2 text-xs xl:text-sm text-zinc-200 hover:text-white font-medium transition-colors min-w-0 cursor-pointer"
+                                        title="Select audio source (tab/window)"
                                     >
-                                        <MonitorPlay className={`w-4 h-4 ${isSourceConnected ? 'text-green-500' : 'text-red-500'}`} />
-                                        <span className="truncate max-w-[120px]">{isSourceConnected ? activeSourceTitle : 'Select Source'}</span>
-                                        <ChevronDown className="w-3 h-3 text-zinc-500" />
+                                        <MonitorPlay className={`w-3.5 h-3.5 xl:w-4 xl:h-4 shrink-0 ${isSourceConnected ? 'text-green-500' : 'text-red-500'}`} />
+                                        <span className="truncate max-w-[100px] xl:max-w-[120px]">{isSourceConnected ? activeSourceTitle : 'Select Source'}</span>
+                                        <ChevronDown className="w-3 h-3 text-zinc-500 shrink-0" />
                                     </button>
                                 </div>
                                 <button
                                     onClick={async () => {
-                                        // Disconnect existing source first
-                                        if (engine && engine.sourceNode) {
-                                            engine.sourceNode.disconnect();
-                                            engine.sourceNode = null;
+                                        // Check current connection status
+                                        if (engine) {
+                                            const isConnected = !!engine.sourceNode;
+                                            setIsSourceConnected(isConnected);
+
+                                            // If disconnected, reconnect (opens dialog)
+                                            if (!isConnected) {
+                                                const success = await selectSource();
+                                                if (success) {
+                                                    setActiveSourceTitle('Display Media');
+                                                    setIsSourceConnected(true);
+                                                } else {
+                                                    setIsSourceConnected(false);
+                                                }
+                                            }
+                                        } else {
                                             setIsSourceConnected(false);
                                         }
-                                        const success = await selectSource();
-                                        if (success) {
-                                            setActiveSourceTitle('Display Media');
-                                            setIsSourceConnected(true);
-                                        }
                                     }}
-                                    className="p-1.5 hover:bg-zinc-800 rounded-full text-zinc-500 hover:text-indigo-400 transition-colors"
-                                    title="Refresh Audio Connection"
+                                    className={`p-1.5 hover:bg-zinc-800 rounded-full transition-colors shrink-0 cursor-pointer ${isSourceConnected ? 'text-green-500 hover:text-green-400' : 'text-red-500 hover:text-red-400'}`}
+                                    title={isSourceConnected ? "Audio source connected" : "Reconnect audio source"}
                                 >
-                                    <RefreshCcw className="w-3 h-3" />
+                                    <RefreshCcw className={`w-3 h-3 ${isSourceConnected ? '' : 'animate-pulse'}`} />
                                 </button>
+                                {/* Mute Source Toggle */}
+                                {isSourceConnected && (
+                                    <button
+                                        onClick={async () => {
+                                            const newValue = !muteSourceDuringRecording;
+                                            setMuteSourceDuringRecording(newValue);
+                                            
+                                            // Ensure we have a tab ID
+                                            let tabIdToUse = sourceTabId;
+                                            if (tabIdToUse === null) {
+                                                const urlParams = new URLSearchParams(window.location.search);
+                                                const targetTabIdParam = urlParams.get('targetTabId');
+                                                if (targetTabIdParam) {
+                                                    const tabId = parseInt(targetTabIdParam, 10);
+                                                    if (!isNaN(tabId)) {
+                                                        tabIdToUse = tabId;
+                                                        setSourceTabId(tabId);
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // If recording is active, apply mute/unmute immediately
+                                            if (isRecording && tabIdToUse !== null) {
+                                                if (newValue) {
+                                                    console.log(`[App] Muting tab ${tabIdToUse} (toggle ON during recording)`);
+                                                    await muteSourceTab(tabIdToUse);
+                                                } else {
+                                                    console.log(`[App] Unmuting tab ${tabIdToUse} (toggle OFF during recording)`);
+                                                    await unmuteSourceTab(tabIdToUse);
+                                                }
+                                            }
+                                        }}
+                                        className={`p-1.5 hover:bg-zinc-800 rounded transition-colors shrink-0 cursor-pointer ${
+                                            muteSourceDuringRecording 
+                                                ? 'text-orange-500 hover:text-orange-400' 
+                                                : 'text-zinc-500 hover:text-zinc-400'
+                                        }`}
+                                        title={muteSourceDuringRecording ? "Mute source tab during recording (ON) - Click to unmute" : "Mute source tab during recording (OFF) - Click to mute"}
+                                    >
+                                        {muteSourceDuringRecording ? (
+                                            <VolumeX className="w-3.5 h-3.5" />
+                                        ) : (
+                                            <Volume2 className="w-3.5 h-3.5" />
+                                        )}
+                                    </button>
+                                )}
                             </div>
                         </div>
                     </div>
 
-                    {/* CENTER: Classic Transport Controls */}
-                    <div className="flex items-center gap-3 shrink-0">
+                    {/* VERTICAL DIVIDER */}
+                    <div className="w-px h-8 bg-zinc-800 shrink-0" />
+
+                    {/* TRANSPORT CONTAINER - Grouped controls */}
+                    <div className="flex items-center gap-2 xl:gap-3 shrink-0 px-2 xl:px-4">
                         <button
                             onClick={toggleArm}
-                            className={`flex flex-col items-center justify-center px-4 py-1.5 rounded transition-all border ${isArmed
+                            className={`flex flex-col items-center justify-center px-2.5 xl:px-4 py-1.5 rounded transition-all border shrink-0 ${isArmed
                                 ? 'bg-yellow-500/10 text-yellow-500 border-yellow-500/50 shadow-[0_0_15px_rgba(234,179,8,0.2)]'
                                 : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:border-zinc-700 hover:text-zinc-400'
                                 }`}
                             title={isArmed ? "Disarm threshold recording" : "Arm threshold recording"}
                         >
-                            <span className="text-[9px] font-bold uppercase tracking-wider">ARM</span>
+                            <span className="text-[8px] xl:text-[9px] font-bold uppercase tracking-wider">ARM</span>
                             <div className={`w-1.5 h-1.5 rounded-full mt-0.5 ${isArmed ? 'bg-yellow-500 animate-pulse' : 'bg-zinc-700'}`} />
                         </button>
 
                         <button
                             onClick={() => setKeyboardMappingEnabled(!keyboardMappingEnabled)}
-                            className={`flex flex-col items-center justify-center px-4 py-1.5 rounded transition-all border ${keyboardMappingEnabled
+                            className={`flex flex-col items-center justify-center px-2.5 xl:px-4 py-1.5 rounded transition-all border shrink-0 ${keyboardMappingEnabled
                                 ? 'bg-indigo-500/10 text-indigo-500 border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.2)]'
                                 : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:border-zinc-700 hover:text-zinc-400'
                                 }`}
                             title={keyboardMappingEnabled ? "Disable keyboard mapping" : "Enable keyboard mapping (Ableton-style)"}
                         >
                             <Keyboard className="w-3 h-3 mb-0.5" />
-                            <span className="text-[9px] font-bold uppercase tracking-wider">KEY</span>
+                            <span className="text-[8px] xl:text-[9px] font-bold uppercase tracking-wider">KEY</span>
                         </button>
 
-                        <div className="w-px h-8 bg-zinc-800 mx-1" />
+                        <div className="w-px h-8 bg-zinc-800 mx-0.5 xl:mx-1 shrink-0" />
 
                         <button
                             onClick={() => {
@@ -1978,10 +2489,10 @@ export default function App() {
                                 if (engine) engine.stop();
                                 setPlaying(false);
                             }}
-                            className="p-2.5 rounded-full hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
+                            className="p-2 xl:p-2.5 rounded-full hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors shrink-0"
                             title="Stop Recording/Playback"
                         >
-                            <SkipBack className="w-5 h-5 fill-current" />
+                            <SkipBack className="w-4 h-4 xl:w-5 xl:h-5 fill-current" />
                         </button>
 
                         <button
@@ -1990,22 +2501,22 @@ export default function App() {
                                 if (engine) engine.stop();
                                 setPlaying(false);
                             }}
-                            className="p-2.5 rounded-full hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
+                            className="p-2 xl:p-2.5 rounded-full hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors shrink-0"
                             title="Stop Recording/Playback"
                         >
-                            <Square className="w-5 h-5 fill-current" />
+                            <Square className="w-4 h-4 xl:w-5 xl:h-5 fill-current" />
                         </button>
 
                         <button
                             onClick={handlePlayToggle}
                             title={isPlaying ? "Pause Playback" : "Play Sample"}
                             aria-label={isPlaying ? "Pause Playback" : "Play Sample"}
-                            className={`w-12 h-12 rounded-full flex items-center justify-center transition-all border ${isPlaying
+                            className={`w-10 h-10 xl:w-12 xl:h-12 rounded-full flex items-center justify-center transition-all border shrink-0 ${isPlaying
                                 ? 'bg-indigo-500 border-indigo-500 text-white shadow-[0_0_20px_rgba(99,102,241,0.4)]'
                                 : 'bg-zinc-800 border-zinc-700 text-zinc-200 hover:bg-zinc-700 hover:border-zinc-600 hover:text-white'
                                 }`}
                         >
-                            {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current ml-1" />}
+                            {isPlaying ? <Pause className="w-5 h-5 xl:w-6 xl:h-6 fill-current" /> : <Play className="w-5 h-5 xl:w-6 xl:h-6 fill-current ml-0.5 xl:ml-1" />}
                         </button>
 
                         <button
@@ -2013,15 +2524,15 @@ export default function App() {
                                 e.preventDefault();
                                 e.stopPropagation();
                                 const newLoopState = !isLooping;
-                                
+
                                 // Update the engine's loop state immediately (vanilla JS - maintains portability)
                                 if (engine) {
                                     engine.isLooping = newLoopState;
                                 }
-                                
+
                                 // Update the Zustand store
                                 setLooping(newLoopState);
-                                
+
                                 // If loop is being turned OFF during active playback, we need to stop and restart
                                 // without looping. This is because AudioBufferSourceNode's loop property can't be
                                 // changed after starting - a looping source will loop forever until stopped.
@@ -2030,11 +2541,11 @@ export default function App() {
                                     const elapsed = engine.context.currentTime - engine.playbackStartTime;
                                     const playbackRate = engine.currentPlaybackRate || 1.0;
                                     const bufferTimeElapsed = elapsed * playbackRate;
-                                    
+
                                     // Determine what we're playing (chop or region)
                                     let startPct = region.start;
                                     let endPct = region.end;
-                                    
+
                                     if (activeChopId && activeTab === TabView.CHOP) {
                                         const chop = chops.find(c => c.id === activeChopId);
                                         if (chop) {
@@ -2042,50 +2553,50 @@ export default function App() {
                                             endPct = chop.end;
                                         }
                                     }
-                                    
+
                                     const duration = activeSample.buffer.duration;
                                     const regionStart = startPct * duration;
                                     const regionEnd = endPct * duration;
                                     const regionDuration = regionEnd - regionStart;
-                                    
+
                                     // Calculate current position within the region (accounting for looping)
                                     let currentPositionInRegion = (bufferTimeElapsed % regionDuration);
                                     const currentBufferPosition = regionStart + currentPositionInRegion;
                                     const currentPositionPct = currentBufferPosition / duration;
-                                    
+
                                     // Stop current playback with fade-out to prevent crackling
                                     engine.stop(true); // Use fade-out
-                                    
+
                                     // Restart from current position without looping
                                     setTimeout(() => {
                                         if (engine && activeSample?.buffer && !engine.activeSource) {
                                             // Clamp position to region bounds
                                             const clampedPosition = Math.max(startPct, Math.min(currentPositionPct, endPct));
-                                            
+
                                             // Store the current time before calling play()
                                             const restartTime = engine.context.currentTime;
-                                            
+
                                             if (activeChopId && activeTab === TabView.CHOP) {
                                                 const chop = chops.find(c => c.id === activeChopId);
                                                 if (chop && activeSample.buffer) {
                                                     engine.play(activeSample.buffer, clampedPosition, chop.end, false);
-                                                    
+
                                                     // Adjust playbackStartTime so playhead continues smoothly
                                                     // Calculate how much buffer time we've already played
                                                     const positionOffset = (clampedPosition - startPct) * duration;
                                                     const realTimeOffset = positionOffset / playbackRate;
                                                     engine.playbackStartTime = restartTime - realTimeOffset;
-                                                    
+
                                                     setPlaying(true);
                                                 }
                                             } else {
                                                 engine.play(activeSample.buffer, clampedPosition, region.end, false);
-                                                
+
                                                 // Adjust playbackStartTime so playhead continues smoothly
                                                 const positionOffset = (clampedPosition - startPct) * duration;
                                                 const realTimeOffset = positionOffset / playbackRate;
                                                 engine.playbackStartTime = restartTime - realTimeOffset;
-                                                
+
                                                 setPlaying(true);
                                             }
                                         }
@@ -2094,44 +2605,82 @@ export default function App() {
                             }}
                             title={isLooping ? "Disable Loop" : "Enable Loop"}
                             aria-label={isLooping ? "Disable Loop" : "Enable Loop"}
-                            className={`w-12 h-12 rounded-full flex items-center justify-center transition-all border ml-1 ${isLooping
+                            className={`w-10 h-10 xl:w-12 xl:h-12 rounded-full flex items-center justify-center transition-all border ml-0.5 xl:ml-1 shrink-0 ${isLooping
                                 ? 'bg-green-600 border-green-500 text-white shadow-[0_0_15px_rgba(34,197,94,0.4)]'
                                 : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:border-zinc-600 hover:text-green-400'
                                 }`}
                         >
-                            <Repeat className="w-5 h-5" />
+                            <Repeat className="w-4 h-4 xl:w-5 xl:h-5" />
                         </button>
 
                         <button
                             onClick={toggleRecord}
                             title={isRecording ? "Stop Recording" : "Start Recording"}
-                            className={`w-12 h-12 rounded-full flex items-center justify-center border transition-all ml-1 ${isRecording
+                            className={`w-10 h-10 xl:w-12 xl:h-12 rounded-full flex items-center justify-center border transition-all ml-0.5 xl:ml-1 shrink-0 ${isRecording
                                 ? 'bg-red-600 border-red-500 text-white animate-pulse shadow-[0_0_20px_rgba(220,38,38,0.6)]'
                                 : 'bg-zinc-900 border-red-900/40 text-red-600 hover:text-red-500 hover:border-red-500 hover:bg-red-950/20 shadow-[0_0_10px_rgba(220,38,38,0.1)]'
                                 }`}
                         >
-                            <div className={`rounded-full transition-all ${isRecording ? 'w-4 h-4 bg-white rounded-sm' : 'w-5 h-5 bg-current'}`} />
+                            <div className={`rounded-full transition-all ${isRecording ? 'w-3.5 h-3.5 xl:w-4 xl:h-4 bg-white rounded-sm' : 'w-4 h-4 xl:w-5 xl:h-5 bg-current'}`} />
                         </button>
                     </div>
 
-                    {/* TIME READOUT */}
-                    <div className="flex items-center gap-2 shrink-0 px-4">
-                        <div className="text-xs font-mono text-zinc-400">
-                            {formatDuration(playbackTime.current)} / {formatDuration(playbackTime.total)}
+                    {/* VERTICAL DIVIDER */}
+                    <div className="w-px h-8 bg-zinc-800 shrink-0" />
+
+                    {/* TIME & STATUS CONTAINER - Combined right-aligned */}
+                    <div className="flex items-center gap-4 shrink-0 px-2 xl:px-4 min-w-0 ml-auto">
+                        <div className="flex items-center gap-2 shrink-0 min-w-0">
+                            <div className="text-[10px] xl:text-xs font-mono text-zinc-400 whitespace-nowrap min-w-0">
+                                {formatDuration(playbackTime.current)} / {formatDuration(playbackTime.total)}
+                            </div>
+                        </div>
+                        <div className="flex justify-end shrink-0 min-w-[80px] xl:min-w-[120px]">
+                            {isRecording ? (
+                                <span className="flex items-center gap-2 text-[10px] xl:text-xs text-red-500 animate-pulse font-bold tracking-widest font-mono">
+                                    <div className="w-2 h-2 rounded-full bg-red-500" />
+                                    RECORDING
+                                </span>
+                            ) : isArmed ? (
+                                <button
+                                    onClick={() => {
+                                        setActiveSample('');
+                                        if (activeSampleId) {
+                                            setRegion(activeSampleId, { start: 0, end: 1 });
+                                        }
+                                        setPlaying(false);
+                                        if (engine) engine.stop();
+                                        if (activeSampleId) {
+                                            setActiveChopId(activeSampleId, null);
+                                        }
+                                    }}
+                                    className="text-[10px] xl:text-xs text-yellow-600 hover:text-yellow-500 font-medium tracking-wide font-mono transition-colors cursor-pointer"
+                                    title="Clear workspace for new sample"
+                                >
+                                    READY TO RECORD
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={() => {
+                                        setActiveSample('');
+                                        if (activeSampleId) {
+                                            setRegion(activeSampleId, { start: 0, end: 1 });
+                                        }
+                                        setPlaying(false);
+                                        if (engine) engine.stop();
+                                        if (activeSampleId) {
+                                            setActiveChopId(activeSampleId, null);
+                                        }
+                                    }}
+                                    className="text-[10px] xl:text-xs text-zinc-500 hover:text-zinc-400 font-medium tracking-wide font-mono transition-colors cursor-pointer"
+                                    title="Clear workspace for new sample"
+                                >
+                                    New Sample
+                                </button>
+                            )}
                         </div>
                     </div>
 
-                    {/* RIGHT: Status Indicator */}
-                    <div className="flex justify-end text-xs text-zinc-600 font-mono shrink-0 min-w-[120px]">
-                        {isRecording ? (
-                            <span className="flex items-center gap-2 text-red-500 animate-pulse font-bold tracking-widest">
-                                <div className="w-2 h-2 rounded-full bg-red-500" />
-                                RECORDING
-                            </span>
-                        ) : isArmed ? (
-                            <span className="text-yellow-600 font-medium tracking-wide">READY TO RECORD</span>
-                        ) : null}
-                    </div>
                 </div>
             </header>
 
@@ -2147,7 +2696,8 @@ export default function App() {
                     onSelectSample={handleSelectSample}
                     onSaveAs={handleSaveAs}
                     onExportAll={handleExportAll}
-                    onShare={handleShare}
+                    onSaveSession={() => setSessionDialogMode('save')}
+                    onLoadSession={() => setSessionDialogMode('load')}
                     onSelectChop={(sampleId, chopId) => {
                         handleSelectSample(sampleId);
                         setActiveSample(sampleId);
@@ -2203,6 +2753,7 @@ export default function App() {
                                         >
                                             <Volume2 className="w-3 h-3" /> Normalize
                                         </button>
+
                                     </div>
                                 </div>
 
@@ -2224,6 +2775,9 @@ export default function App() {
                                         previewMode={activeTab === TabView.CHOP}
                                         isLooping={isLooping}
                                         onChopClick={(chopId) => {
+                                            // Only allow chop playback when CHOP tab is active
+                                            if (activeTab !== TabView.CHOP) return;
+
                                             if (activeSampleId) {
                                                 setActiveChopId(activeSampleId, chopId);
                                             }
@@ -2309,7 +2863,14 @@ export default function App() {
                                 className={`px-3 py-2.5 text-[10px] font-bold tracking-normal whitespace-nowrap transition-colors border-r border-zinc-800 flex items-center justify-center gap-1.5 flex-1 min-w-0 ${activeTab === TabView.EQ ? 'text-white bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
                                     }`}
                             >
-                                <Sliders className="w-2.5 h-2.5 shrink-0" /> <span>EQ & FX</span>
+                                <Sliders className="w-2.5 h-2.5 shrink-0" /> <span>EQ</span>
+                            </button>
+                            <button
+                                onClick={() => setActiveTab(TabView.NOISE)}
+                                className={`px-3 py-2.5 text-[10px] font-bold tracking-normal whitespace-nowrap transition-colors border-r border-zinc-800 flex items-center justify-center gap-1.5 flex-1 min-w-0 ${activeTab === TabView.NOISE ? 'text-blue-400 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+                                    }`}
+                            >
+                                <Volume2 className="w-2.5 h-2.5 shrink-0" /> <span>NOISE</span>
                             </button>
                             <button
                                 onClick={() => setActiveTab(TabView.TIME_STRETCH)}
@@ -2317,13 +2878,6 @@ export default function App() {
                                     }`}
                             >
                                 <Gauge className="w-2.5 h-2.5 shrink-0" /> <span className="truncate">TIME STRETCH</span>
-                            </button>
-                            <button
-                                onClick={() => setActiveTab(TabView.STEM_SEPARATION)}
-                                className={`px-3 py-2.5 text-[10px] font-bold tracking-normal whitespace-nowrap transition-colors flex items-center justify-center gap-1.5 flex-1 min-w-0 ${activeTab === TabView.STEM_SEPARATION ? 'text-indigo-400 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
-                                    }`}
-                            >
-                                <Split className="w-2.5 h-2.5 shrink-0" /> <span className="truncate">STEM SEPARATION</span>
                             </button>
                         </div>
 
@@ -2337,25 +2891,11 @@ export default function App() {
                                                 <>
                                                     <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
                                                         <span className="text-zinc-500 shrink-0">Sample Rate</span>
-                                                        <div className="flex items-center gap-2 min-w-0">
-                                                            <span className="text-zinc-200 font-mono text-xs truncate">
-                                                                {activeSample.buffer.sampleRate % 1000 === 0
-                                                                    ? `${(activeSample.buffer.sampleRate / 1000).toFixed(0)}.0 kHz`
-                                                                    : `${(activeSample.buffer.sampleRate / 1000).toFixed(1)} kHz`}
-                                                            </span>
-                                                            <select
-                                                                value={exportSampleRate || activeSample.buffer.sampleRate}
-                                                                onChange={(e) => setExportSampleRate(Number(e.target.value))}
-                                                                className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[10px] font-bold tracking-wide uppercase border border-zinc-700 hover:border-zinc-600 transition-all shrink-0"
-                                                                title="Select export sample rate"
-                                                            >
-                                                                <option value={activeSample.buffer.sampleRate}>Original ({activeSample.buffer.sampleRate % 1000 === 0 ? `${(activeSample.buffer.sampleRate / 1000).toFixed(0)}.0` : `${(activeSample.buffer.sampleRate / 1000).toFixed(1)}`} kHz)</option>
-                                                                <option value="44100">44.1 kHz</option>
-                                                                <option value="48000">48 kHz</option>
-                                                                <option value="96000">96 kHz</option>
-                                                                <option value="192000">192 kHz</option>
-                                                            </select>
-                                                        </div>
+                                                        <span className="text-zinc-200 font-mono text-xs truncate">
+                                                            {activeSample.buffer.sampleRate % 1000 === 0
+                                                                ? `${(activeSample.buffer.sampleRate / 1000).toFixed(0)}.0 kHz`
+                                                                : `${(activeSample.buffer.sampleRate / 1000).toFixed(1)} kHz`}
+                                                        </span>
                                                     </div>
                                                     <div className="flex justify-between items-center text-xs border-b border-zinc-800 pb-1.5 gap-2">
                                                         <span className="text-zinc-500 shrink-0">Bit Depth</span>
@@ -2400,7 +2940,7 @@ export default function App() {
                                                                     if (bpmValue > 0) {
                                                                         const newBPM = bpmValue * 2;
                                                                         setSamples(prev => prev.map(s =>
-                                                                            s.id === activeSampleId 
+                                                                            s.id === activeSampleId
                                                                                 ? { ...s, detectedBPM: newBPM, bpm: newBPM }
                                                                                 : s
                                                                         ));
@@ -2417,7 +2957,7 @@ export default function App() {
                                                                     if (bpmValue > 0) {
                                                                         const newBPM = Math.round(bpmValue / 2);
                                                                         setSamples(prev => prev.map(s =>
-                                                                            s.id === activeSampleId 
+                                                                            s.id === activeSampleId
                                                                                 ? { ...s, detectedBPM: newBPM, bpm: newBPM }
                                                                                 : s
                                                                         ));
@@ -2439,7 +2979,7 @@ export default function App() {
                                                 <span className="text-zinc-500 shrink-0">Key</span>
                                                 <div className="flex items-center gap-2 min-w-0">
                                                     <span className="text-zinc-200 font-mono text-xs truncate">
-                                                        {activeSample.detectedKey 
+                                                        {activeSample.detectedKey
                                                             ? `${activeSample.detectedKey.key} ${activeSample.detectedKey.mode === 'major' ? 'Major' : 'Minor'}${activeSample.detectedKey.confidence < 0.5 ? '?' : ''}`
                                                             : '—'
                                                         }
@@ -2625,7 +3165,7 @@ export default function App() {
                                                                                             onClick={() => {
                                                                                                 const newBPM = activeSample.detectedBPM! * 2;
                                                                                                 setSamples(prev => prev.map(s =>
-                                                                                                    s.id === activeSampleId 
+                                                                                                    s.id === activeSampleId
                                                                                                         ? { ...s, detectedBPM: newBPM, bpm: newBPM }
                                                                                                         : s
                                                                                                 ));
@@ -2639,7 +3179,7 @@ export default function App() {
                                                                                             onClick={() => {
                                                                                                 const newBPM = Math.round(activeSample.detectedBPM! / 2);
                                                                                                 setSamples(prev => prev.map(s =>
-                                                                                                    s.id === activeSampleId 
+                                                                                                    s.id === activeSampleId
                                                                                                         ? { ...s, detectedBPM: newBPM, bpm: newBPM }
                                                                                                         : s
                                                                                                 ));
@@ -2897,17 +3437,16 @@ export default function App() {
                                         relative w-full max-w-4xl bg-zinc-900 rounded-3xl 
                                         shadow-[0_20px_50px_-12px_rgba(0,0,0,1),0_0_0_1px_rgba(255,255,255,0.05),inset_0_1px_1px_rgba(255,255,255,0.05)]
                                         overflow-hidden transition-all duration-500
-                                        ${!eqEnabled ? 'brightness-[0.4] grayscale' : ''}
                                     `}>
-                                        
+
                                         {/* Header / Status Bar */}
                                         <div className="flex items-center justify-between px-6 pt-6 pb-4">
                                             <div className="flex items-center gap-3">
-                                                <div className={`w-1.5 h-1.5 rounded-full ${eqEnabled ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]' : 'bg-red-900'}`}></div>
+                                                <div className={`w-1.5 h-1.5 rounded-full ${eqEnabled && (lowGain !== 0 || midGain !== 0 || highGain !== 0 || lowFreq !== 100 || midFreq !== 1000 || highFreq !== 8000 || midQ !== 1.2) ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]' : 'bg-zinc-600'}`}></div>
                                                 <span className="text-zinc-400 text-xs font-bold tracking-[0.2em]">EQ-3 PRO</span>
                                             </div>
                                             <div className="flex items-center gap-3">
-                                                <button 
+                                                <button
                                                     onClick={() => {
                                                         setLowGain(0);
                                                         setLowFreq(100);
@@ -2922,13 +3461,12 @@ export default function App() {
                                                 >
                                                     Reset
                                                 </button>
-                                                <button 
-                                                    onClick={() => setEqEnabled(!eqEnabled)} 
-                                                    className={`px-4 py-2 text-xs font-bold transition-all border rounded ${
-                                                        eqEnabled 
-                                                            ? 'bg-emerald-600 border-emerald-500 text-white shadow-[0_0_10px_rgba(16,185,129,0.4)] hover:bg-emerald-500' 
-                                                            : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:border-zinc-600 hover:text-zinc-300'
-                                                    }`}
+                                                <button
+                                                    onClick={() => setEqEnabled(!eqEnabled)}
+                                                    className={`px-4 py-2 text-xs font-bold transition-all border rounded ${eqEnabled
+                                                        ? 'bg-emerald-600 border-emerald-500 text-white shadow-[0_0_10px_rgba(16,185,129,0.4)] hover:bg-emerald-500'
+                                                        : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:border-zinc-600 hover:text-zinc-300'
+                                                        }`}
                                                     title={eqEnabled ? "Disable EQ" : "Enable EQ"}
                                                 >
                                                     {eqEnabled ? 'ON' : 'OFF'}
@@ -2940,7 +3478,7 @@ export default function App() {
                                         <div className="px-6 pb-6 flex gap-6">
                                             {/* Left Column: Visualizer */}
                                             <div className="flex-1">
-                                                <EQCombinedVisualizer 
+                                                <EQCombinedVisualizer
                                                     isPlaying={isPlaying}
                                                     bands={[
                                                         { name: 'Low', gain: lowGain, freq: lowFreq, q: 1.0, color: '#f59e0b' },
@@ -2953,10 +3491,10 @@ export default function App() {
                                             {/* Right Column: Controls */}
                                             <div className="flex-shrink-0">
                                                 <div className="flex justify-between bg-zinc-950/40 rounded-2xl p-5 border border-white/5 shadow-inner">
-                                                    
+
                                                     {/* Low Band */}
                                                     <div className="flex flex-col items-center gap-5 px-1 w-24">
-                                                        <EQKnob 
+                                                        <EQKnob
                                                             label="Low"
                                                             size="md"
                                                             value={lowGain}
@@ -2966,7 +3504,7 @@ export default function App() {
                                                             onChange={(val) => setLowGain(val)}
                                                         />
                                                         <div className="flex flex-col gap-3 pt-1 w-full items-center border-t border-white/5">
-                                                            <EQKnob 
+                                                            <EQKnob
                                                                 label="Freq"
                                                                 size="sm"
                                                                 min={20}
@@ -2983,7 +3521,7 @@ export default function App() {
 
                                                     {/* Mid Band */}
                                                     <div className="flex flex-col items-center gap-5 px-1 w-24">
-                                                        <EQKnob 
+                                                        <EQKnob
                                                             label="Mid"
                                                             size="md"
                                                             value={midGain}
@@ -2994,7 +3532,7 @@ export default function App() {
                                                         />
                                                         <div className="flex flex-col gap-3 pt-1 w-full items-center border-t border-white/5">
                                                             <div className="flex items-center justify-between w-full gap-2">
-                                                                <EQKnob 
+                                                                <EQKnob
                                                                     label="Freq"
                                                                     size="sm"
                                                                     min={400}
@@ -3004,7 +3542,7 @@ export default function App() {
                                                                     formatValue={(val) => val >= 1000 ? `${(val / 1000).toFixed(1)}k` : `${Math.round(val)}`}
                                                                     onChange={(val) => setMidFreq(val)}
                                                                 />
-                                                                <EQKnob 
+                                                                <EQKnob
                                                                     label="Q"
                                                                     size="sm"
                                                                     min={0.1}
@@ -3022,7 +3560,7 @@ export default function App() {
 
                                                     {/* High Band */}
                                                     <div className="flex flex-col items-center gap-5 px-1 w-24">
-                                                        <EQKnob 
+                                                        <EQKnob
                                                             label="High"
                                                             size="md"
                                                             value={highGain}
@@ -3032,7 +3570,7 @@ export default function App() {
                                                             onChange={(val) => setHighGain(val)}
                                                         />
                                                         <div className="flex flex-col gap-3 pt-1 w-full items-center border-t border-white/5">
-                                                            <EQKnob 
+                                                            <EQKnob
                                                                 label="Freq"
                                                                 size="sm"
                                                                 min={4000}
@@ -3069,7 +3607,7 @@ export default function App() {
                                                                             const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
                                                                             const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
                                                                             const newName = `${originalName}_EQ.${extension}`;
-                                                                            
+
                                                                             const newSample: Sample = {
                                                                                 ...activeSample,
                                                                                 id: Date.now().toString(),
@@ -3080,17 +3618,19 @@ export default function App() {
                                                                                 blob: blob,
                                                                                 waveform: []
                                                                             };
-                                                                            
+
                                                                             setSamples(prev => [newSample, ...prev]);
                                                                             setActiveSample(newSample.id);
-                                                                            
-                                                                            // Reset effects
-                                                                            if (engine) {
-                                                                                engine.setDelay(0.3, 0.3, 0);
-                                                                                engine.setReverb(0.5, 0.5, 0);
-                                                                            }
-                                                                            usePlaybackStore.getState().resetEffects();
-                                                                            prevStretchRatioRef.current = 1.0;
+
+                                                                            // Reset only EQ effect after baking (not all effects)
+                                                                            setEQEnabled(false);
+                                                                            setLowGain(0);
+                                                                            setMidGain(0);
+                                                                            setHighGain(0);
+                                                                            setLowFreq(100);
+                                                                            setMidFreq(1000);
+                                                                            setHighFreq(8000);
+                                                                            setMidQ(1.2);
                                                                         }
                                                                     } catch (error) {
                                                                         console.error('Error applying EQ:', error);
@@ -3109,19 +3649,19 @@ export default function App() {
                                                                         };
                                                                         const croppedBuffer = await engine.crop(tempSampleStub);
                                                                         if (!croppedBuffer) return;
-                                                                        
+
                                                                         // Reset region after crop is applied
                                                                         if (activeSampleId) {
-                    setRegion(activeSampleId, { start: 0, end: 1 });
-                }
-                                                                        
+                                                                            setRegion(activeSampleId, { start: 0, end: 1 });
+                                                                        }
+
                                                                         const processedBuffer = await engine.applyEffectsAndResample(croppedBuffer);
                                                                         if (processedBuffer) {
                                                                             const blob = audioBufferToWav(processedBuffer);
                                                                             const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
                                                                             const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
                                                                             const newName = `${originalName}_Cropped_EQ.${extension}`;
-                                                                            
+
                                                                             const newSample: Sample = {
                                                                                 ...activeSample,
                                                                                 id: Date.now().toString(),
@@ -3132,17 +3672,19 @@ export default function App() {
                                                                                 blob: blob,
                                                                                 waveform: []
                                                                             };
-                                                                            
+
                                                                             setSamples(prev => [newSample, ...prev]);
                                                                             setActiveSample(newSample.id);
-                                                                            
-                                                                            // Reset effects
-                                                                            if (engine) {
-                                                                                engine.setDelay(0.3, 0.3, 0);
-                                                                                engine.setReverb(0.5, 0.5, 0);
-                                                                            }
-                                                                            usePlaybackStore.getState().resetEffects();
-                                                                            prevStretchRatioRef.current = 1.0;
+
+                                                                            // Reset only EQ effect after baking (not all effects)
+                                                                            setEQEnabled(false);
+                                                                            setLowGain(0);
+                                                                            setMidGain(0);
+                                                                            setHighGain(0);
+                                                                            setLowFreq(100);
+                                                                            setMidFreq(1000);
+                                                                            setHighFreq(8000);
+                                                                            setMidQ(1.2);
                                                                         }
                                                                     } catch (error) {
                                                                         console.error('Error applying EQ with crop:', error);
@@ -3151,10 +3693,19 @@ export default function App() {
                                                             }
                                                         });
                                                     } else {
+                                                        // Check if other effects are active
+                                                        const noiseGateActive = noiseGateEnabled;
+                                                        const timeStretchActive = timeStretchEnabled && timeStretchRatio !== 1.0;
+                                                        const hasOtherEffects = noiseGateActive || timeStretchActive;
+
                                                         // No pending crop, apply EQ normally
                                                         setProcessingDialog({
                                                             isOpen: true,
                                                             type: 'filter',
+                                                            title: hasOtherEffects ? 'Apply EQ (Other Effects Active)' : 'Apply EQ',
+                                                            description: hasOtherEffects 
+                                                                ? 'EQ will be baked into the sample. Note: Noise Gate and/or Time Stretch are also active but will not be applied unless you use those controls separately.'
+                                                                : 'This will create a new sample with EQ processing applied. The original sample will remain unchanged.',
                                                             onConfirm: async () => {
                                                                 setProcessingDialog(null);
                                                                 if (activeSample && engine && activeSample.buffer) {
@@ -3165,7 +3716,7 @@ export default function App() {
                                                                             const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
                                                                             const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
                                                                             const newName = `${originalName}_EQ.${extension}`;
-                                                                            
+
                                                                             const newSample: Sample = {
                                                                                 ...activeSample,
                                                                                 id: Date.now().toString(),
@@ -3176,18 +3727,20 @@ export default function App() {
                                                                                 blob: blob,
                                                                                 waveform: []
                                                                             };
-                                                                            
+
                                                                             setSamples(prev => [newSample, ...prev]);
                                                                             setActiveSample(newSample.id);
-                                                                            
-                                                                            // Reset all effects and preview state when effects are baked into sample
+
+                                                                            // Reset only EQ effect after baking (not all effects)
                                                                             // This prevents double application when the new sample is played
-                                                                            if (engine) {
-                                                                                engine.setDelay(0.3, 0.3, 0);
-                                                                                engine.setReverb(0.5, 0.5, 0);
-                                                                            }
-                                                                            usePlaybackStore.getState().resetEffects();
-                                                                            prevStretchRatioRef.current = 1.0;
+                                                                            setEQEnabled(false);
+                                                                            setLowGain(0);
+                                                                            setMidGain(0);
+                                                                            setHighGain(0);
+                                                                            setLowFreq(100);
+                                                                            setMidFreq(1000);
+                                                                            setHighFreq(8000);
+                                                                            setMidQ(1.2);
                                                                         }
                                                                     } catch (error) {
                                                                         console.error('Error applying EQ:', error);
@@ -3206,22 +3759,71 @@ export default function App() {
                                 </div>
                             )}
 
+
+                            {activeTab === TabView.NOISE && (
+                                <NoiseReductionTab
+                                    enabled={noiseGateEnabled}
+                                    sensitivity={liveNoiseSensitivity}
+                                    amount={liveNoiseAmount}
+                                    onChange={(newEnabled, newSens, newAmt) => {
+                                        // Auto-enable if parameters change while disabled
+                                        // This ensures moving controls automatically enables the effect
+                                        const valuesChanged = newSens !== liveNoiseSensitivity || newAmt !== liveNoiseAmount;
+
+                                        if (valuesChanged && !noiseGateEnabled) {
+                                            // Auto-enable when controls are moved
+                                            setNoiseGateEnabled(true);
+                                            setLiveNoiseSensitivity(newSens);
+                                            setLiveNoiseAmount(newAmt);
+                                        } else {
+                                            // Manual toggle or no change
+                                            setNoiseGateEnabled(newEnabled);
+                                            setLiveNoiseSensitivity(newSens);
+                                            setLiveNoiseAmount(newAmt);
+                                        }
+                                    }}
+                                    onReset={() => {
+                                        // Reset parameters to defaults but preserve enabled state
+                                        setLiveNoiseSensitivity(0.5);
+                                        setLiveNoiseAmount(0.5);
+                                    }}
+                                    onApply={handleApplyNoiseReduction}
+                                />
+                            )}
+
                             {activeTab === TabView.TIME_STRETCH && activeSample && (
                                 <div className="flex flex-col h-full overflow-auto p-4 gap-6">
                                     <div>
                                         <div className="flex items-center justify-between mb-3">
                                             <h4 className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">Time Stretching</h4>
-                                            <button 
-                                                onClick={() => setTimeStretchEnabled(!timeStretchEnabled)} 
-                                                className={`px-4 py-2 text-xs font-bold transition-all border rounded ${
-                                                    timeStretchEnabled 
-                                                        ? 'bg-emerald-600 border-emerald-500 text-white shadow-[0_0_10px_rgba(16,185,129,0.4)] hover:bg-emerald-500' 
+                                            <div className="flex items-center gap-3">
+                                                <button
+                                                    onClick={() => {
+                                                        // Reset ratio to default but preserve enabled state
+                                                        setTimeStretchRatio(1.0);
+                                                    }}
+                                                    className="px-3 py-1.5 text-xs font-semibold text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded transition-colors"
+                                                    title="Reset Time Stretch ratio to default"
+                                                >
+                                                    Reset
+                                                </button>
+                                                <button
+                                                    onClick={() => {
+                                                        setTimeStretchEnabled(!timeStretchEnabled);
+                                                        // Restart playback immediately if currently playing
+                                                        if (isPlaying) {
+                                                            restartPlaybackIfPlaying();
+                                                        }
+                                                    }}
+                                                    className={`px-4 py-2 text-xs font-bold transition-all border rounded ${timeStretchEnabled
+                                                        ? 'bg-emerald-600 border-emerald-500 text-white shadow-[0_0_10px_rgba(16,185,129,0.4)] hover:bg-emerald-500'
                                                         : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:border-zinc-600 hover:text-zinc-300'
-                                                }`}
-                                                title={timeStretchEnabled ? "Disable Time-Stretch" : "Enable Time-Stretch"}
-                                            >
-                                                {timeStretchEnabled ? 'ON' : 'OFF'}
-                                            </button>
+                                                        }`}
+                                                    title={timeStretchEnabled ? "Disable Time-Stretch" : "Enable Time-Stretch"}
+                                                >
+                                                    {timeStretchEnabled ? 'ON' : 'OFF'}
+                                                </button>
+                                            </div>
                                         </div>
                                         <div className="space-y-4">
                                             {/* Sample Tempo */}
@@ -3257,7 +3859,7 @@ export default function App() {
                                                                 if (bpmResult && bpmResult.bpm) {
                                                                     setSamples(prevSamples =>
                                                                         prevSamples.map(s =>
-                                                                            s.id === activeSample.id 
+                                                                            s.id === activeSample.id
                                                                                 ? { ...s, detectedBPM: bpmResult.bpm, bpm: bpmResult.bpm }
                                                                                 : s
                                                                         )
@@ -3354,7 +3956,10 @@ export default function App() {
                                                 <div className="flex gap-2 text-[10px] text-zinc-500">
                                                     <button
                                                         onClick={() => {
-                                                            if (!syncToTempo) setTimeStretchRatio(0.5);
+                                                            if (!syncToTempo) {
+                                                                setTimeStretchRatio(0.5);
+                                                                if (timeStretchEnabled) restartPlaybackIfPlaying();
+                                                            }
                                                         }}
                                                         disabled={syncToTempo}
                                                         className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
@@ -3363,7 +3968,10 @@ export default function App() {
                                                     </button>
                                                     <button
                                                         onClick={() => {
-                                                            if (!syncToTempo) setTimeStretchRatio(0.75);
+                                                            if (!syncToTempo) {
+                                                                setTimeStretchRatio(0.75);
+                                                                if (timeStretchEnabled) restartPlaybackIfPlaying();
+                                                            }
                                                         }}
                                                         disabled={syncToTempo}
                                                         className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
@@ -3372,7 +3980,10 @@ export default function App() {
                                                     </button>
                                                     <button
                                                         onClick={() => {
-                                                            if (!syncToTempo) setTimeStretchRatio(1.0);
+                                                            if (!syncToTempo) {
+                                                                setTimeStretchRatio(1.0);
+                                                                if (timeStretchEnabled) restartPlaybackIfPlaying();
+                                                            }
                                                         }}
                                                         disabled={syncToTempo}
                                                         className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
@@ -3381,7 +3992,10 @@ export default function App() {
                                                     </button>
                                                     <button
                                                         onClick={() => {
-                                                            if (!syncToTempo) setTimeStretchRatio(1.25);
+                                                            if (!syncToTempo) {
+                                                                setTimeStretchRatio(1.25);
+                                                                if (timeStretchEnabled) restartPlaybackIfPlaying();
+                                                            }
                                                         }}
                                                         disabled={syncToTempo}
                                                         className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
@@ -3390,7 +4004,10 @@ export default function App() {
                                                     </button>
                                                     <button
                                                         onClick={() => {
-                                                            if (!syncToTempo) setTimeStretchRatio(1.5);
+                                                            if (!syncToTempo) {
+                                                                setTimeStretchRatio(1.5);
+                                                                if (timeStretchEnabled) restartPlaybackIfPlaying();
+                                                            }
                                                         }}
                                                         disabled={syncToTempo}
                                                         className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
@@ -3399,7 +4016,10 @@ export default function App() {
                                                     </button>
                                                     <button
                                                         onClick={() => {
-                                                            if (!syncToTempo) setTimeStretchRatio(2.0);
+                                                            if (!syncToTempo) {
+                                                                setTimeStretchRatio(2.0);
+                                                                if (timeStretchEnabled) restartPlaybackIfPlaying();
+                                                            }
                                                         }}
                                                         disabled={syncToTempo}
                                                         className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
@@ -3415,7 +4035,7 @@ export default function App() {
                                                         <span>{Math.round(timeStretchProgress * 100)}%</span>
                                                     </div>
                                                     <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                                                        <div 
+                                                        <div
                                                             className="h-full bg-indigo-500 transition-all duration-300"
                                                             style={{ width: `${timeStretchProgress * 100}%` }}
                                                         />
@@ -3423,184 +4043,60 @@ export default function App() {
                                                 </div>
                                             )}
                                             <div className="flex gap-2">
-                                            <button
-                                                onClick={() => {
-                                                    // Preview button now works like regular play button
-                                                    // When time-stretch is enabled, both buttons do the same thing
-                                                    handlePlayToggle();
-                                                }}
-                                                disabled={activeSample.isTimeStretching || !activeSample.buffer}
-                                                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 disabled:cursor-not-allowed text-white text-xs font-bold rounded border border-zinc-600 transition-colors"
-                                            >
-                                                <MonitorPlay className="w-4 h-4" />
-                                                Preview
-                                            </button>
-                                            <button
-                                                onClick={async () => {
-                                                    if (!activeSample?.buffer || !engine) {
-                                                        console.error('Cannot time stretch: missing buffer or engine');
-                                                        alert('Cannot time stretch: Please select a sample with audio data');
-                                                        return;
-                                                    }
-                                                    
-                                                    // Check if there's a pending crop
-                                                    if (hasPendingCrop()) {
-                                                        setProcessingDialog({
-                                                            isOpen: true,
-                                                            type: 'timeStretch-with-crop',
-                                                            onConfirm: async () => {
-                                                                setProcessingDialog(null);
-                                                                await applyTimeStretch(false); // Time stretch only (no crop)
-                                                            },
-                                                            onApplyWithCrop: async () => {
-                                                                setProcessingDialog(null);
-                                                                await applyTimeStretch(true); // Apply crop then time stretch
-                                                            }
-                                                        });
-                                                    } else {
-                                                        // No pending crop, apply time stretch normally
-                                                        await applyTimeStretch(false);
-                                                    }
-                                                }}
-                                                disabled={activeSample.isTimeStretching || !activeSample.buffer}
-                                                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white text-xs font-bold rounded border border-indigo-500 transition-colors"
-                                            >
-                                                {activeSample.isTimeStretching ? (
-                                                    <>
-                                                        <Loader2 className="w-4 h-4 animate-spin" />
-                                                        Stretching...
-                                                    </>
-                                                ) : (
-                                                    <>
-                                                        <Sparkles className="w-4 h-4" />
-                                                        Apply Time Stretch
-                                                    </>
-                                                )}
-                                            </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-
-                            {activeTab === TabView.STEM_SEPARATION && activeSample && (
-                                <div className="flex flex-col h-full overflow-auto p-4 gap-6">
-                                    <div>
-                                        <h4 className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-3">Stem Separation</h4>
-                                        <div className="space-y-4">
-                                            <div className="flex flex-col gap-2">
-                                                <label className="text-xs text-zinc-400">Model Type</label>
-                                                <select
-                                                    value={stemModelType}
-                                                    onChange={(e) => setStemModelType(e.target.value as '2stems' | '4stems' | '5stems')}
-                                                    className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs font-bold border border-zinc-700"
+                                                <button
+                                                    onClick={() => {
+                                                        // Preview button now works like regular play button
+                                                        // When time-stretch is enabled, both buttons do the same thing
+                                                        handlePlayToggle();
+                                                    }}
+                                                    disabled={activeSample.isTimeStretching || !activeSample.buffer}
+                                                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 disabled:cursor-not-allowed text-white text-xs font-bold rounded border border-zinc-600 transition-colors"
                                                 >
-                                                    <option value="2stems">2 Stems (Vocals/Accompaniment)</option>
-                                                    <option value="4stems">4 Stems (Vocals/Drums/Bass/Other)</option>
-                                                    <option value="5stems">5 Stems (Vocals/Drums/Bass/Piano/Other)</option>
-                                                </select>
-                                            </div>
-                                            <div className="flex flex-col gap-2">
-                                                <label className="text-xs text-zinc-400">Server Endpoint (Optional)</label>
-                                                <input
-                                                    type="text"
-                                                    value={stemSeparationServer}
-                                                    onChange={(e) => setStemSeparationServer(e.target.value)}
-                                                    placeholder="https://api.example.com/separate"
-                                                    className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs border border-zinc-700 placeholder-zinc-600"
-                                                />
-                                                <p className="text-[10px] text-zinc-500">
-                                                    Leave empty for browser-based separation (requires TensorFlow.js)
-                                                </p>
-                                            </div>
-                                            <button
-                                                onClick={async () => {
-                                                    if (!activeSample?.buffer || !engine) return;
-                                                    
-                                                    setSamples(samples.map(s => 
-                                                        s.id === activeSample.id ? { ...s, isSeparatingStems: true } : s
-                                                    ));
-                                                    
-                                                    try {
-                                                        const result = stemSeparationServer
-                                                            ? await engine.separateStemsServer(activeSample.buffer, stemSeparationServer, { modelType: stemModelType })
-                                                            : await engine.separateStems(activeSample.buffer, { modelType: stemModelType });
-                                                        
-                                                        if (result) {
-                                                            setSamples(samples.map(s => {
-                                                                if (s.id === activeSample.id) {
-                                                                    return { ...s, stems: result, isSeparatingStems: false };
-                                                                }
-                                                                return s;
-                                                            }));
-                                                            
-                                                            // Create new samples for each stem
-                                                            const stemNames = {
-                                                                vocals: 'Vocals',
-                                                                drums: 'Drums',
-                                                                bass: 'Bass',
-                                                                other: 'Other',
-                                                                accompaniment: 'Accompaniment'
-                                                            };
-                                                            
-                                                            const newSamples: Sample[] = [];
-                                                            for (const [stemKey, stemBuffer] of Object.entries(result)) {
-                                                                if (stemBuffer) {
-                                                                    const blob = audioBufferToWav(stemBuffer);
-                                                                    const originalName = activeSample.name.replace(/\.(wav|mp3|flac|ogg)$/i, '');
-                                                                    const extension = activeSample.name.match(/\.(wav|mp3|flac|ogg)$/i)?.[1] || 'wav';
-                                                                    const stemName = stemNames[stemKey as keyof typeof stemNames] || stemKey;
-                                                                    const newName = `${originalName}_${stemName}.${extension}`;
-                                                                    
-                                                                    newSamples.push({
-                                                                        id: `${Date.now()}-${stemKey}`,
-                                                                        name: newName,
-                                                                        duration: formatDuration(stemBuffer.duration),
-                                                                        bpm: activeSample.bpm,
-                                                                        size: `${(blob.size / 1024 / 1024).toFixed(2)} MB`,
-                                                                        waveform: [],
-                                                                        tags: [...activeSample.tags, 'Stem', stemName],
-                                                                        buffer: stemBuffer,
-                                                                        blob: blob,
-                                                                        trimStart: 0,
-                                                                        trimEnd: 1
-                                                                    });
-                                                                }
-                                                            }
-                                                            
-                                                            if (newSamples.length > 0) {
-                                                                setSamples([...newSamples, ...samples]);
-                                                            }
-                                                        } else {
-                                                            console.warn('Stem separation returned no results');
+                                                    <MonitorPlay className="w-4 h-4" />
+                                                    Preview
+                                                </button>
+                                                <button
+                                                    onClick={async () => {
+                                                        if (!activeSample?.buffer || !engine) {
+                                                            console.error('Cannot time stretch: missing buffer or engine');
+                                                            alert('Cannot time stretch: Please select a sample with audio data');
+                                                            return;
                                                         }
-                                                    } catch (error) {
-                                                        console.error('Stem separation error:', error);
-                                                    } finally {
-                                                        setSamples(samples.map(s => 
-                                                            s.id === activeSample.id ? { ...s, isSeparatingStems: false } : s
-                                                        ));
-                                                    }
-                                                }}
-                                                disabled={activeSample.isSeparatingStems || !activeSample.buffer}
-                                                className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white text-xs font-bold rounded border border-indigo-500 transition-colors"
-                                            >
-                                                {activeSample.isSeparatingStems ? (
-                                                    <>
-                                                        <Loader2 className="w-4 h-4 animate-spin" />
-                                                        Separating...
-                                                    </>
-                                                ) : (
-                                                    <>
-                                                        <Split className="w-4 h-4" />
-                                                        Separate Stems
-                                                    </>
-                                                )}
-                                            </button>
-                                            <div className="text-[10px] text-zinc-500 bg-zinc-800/50 p-3 rounded border border-zinc-800">
-                                                <p className="font-semibold mb-1">Note:</p>
-                                                <p>Browser-based separation requires TensorFlow.js and model files (50-200MB).</p>
-                                                <p className="mt-2">For best results, use server-side separation with Spleeter or Demucs.</p>
+
+                                                        // Check if there's a pending crop
+                                                        if (hasPendingCrop()) {
+                                                            setProcessingDialog({
+                                                                isOpen: true,
+                                                                type: 'timeStretch-with-crop',
+                                                                onConfirm: async () => {
+                                                                    setProcessingDialog(null);
+                                                                    await applyTimeStretch(false); // Time stretch only (no crop)
+                                                                },
+                                                                onApplyWithCrop: async () => {
+                                                                    setProcessingDialog(null);
+                                                                    await applyTimeStretch(true); // Apply crop then time stretch
+                                                                }
+                                                            });
+                                                        } else {
+                                                            // No pending crop, apply time stretch normally
+                                                            await applyTimeStretch(false);
+                                                        }
+                                                    }}
+                                                    disabled={activeSample.isTimeStretching || !activeSample.buffer}
+                                                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white text-xs font-bold rounded border border-indigo-500 transition-colors"
+                                                >
+                                                    {activeSample.isTimeStretching ? (
+                                                        <>
+                                                            <Loader2 className="w-4 h-4 animate-spin" />
+                                                            Stretching...
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <Sparkles className="w-4 h-4" />
+                                                            Apply Time Stretch
+                                                        </>
+                                                    )}
+                                                </button>
                                             </div>
                                         </div>
                                     </div>
@@ -3621,19 +4117,6 @@ export default function App() {
                                 </div>
                             )}
 
-                            {activeTab === TabView.STEM_SEPARATION && !activeSample && (
-                                <div className="absolute inset-0 flex items-center justify-center">
-                                    <div className="text-center">
-                                        <div className="w-16 h-16 bg-zinc-800/50 rounded-full flex items-center justify-center mx-auto mb-4 border border-zinc-700">
-                                            <Split className="w-6 h-6 text-zinc-400" />
-                                        </div>
-                                        <h3 className="text-lg font-bold text-white mb-2">Stem Separation</h3>
-                                        <p className="text-zinc-500 text-sm max-w-xs mx-auto">
-                                            Select a sample to separate into individual stems (vocals, drums, bass, etc.).
-                                        </p>
-                                    </div>
-                                </div>
-                            )}
                         </div>
                     </div>
                 </main>
@@ -3650,7 +4133,7 @@ export default function App() {
                             threshold={recThreshold}
                             onGainChange={setGain}
                             onThresholdChange={setRecThreshold}
-                            onStartRecording={startRecording}
+                            onStartRecording={handleStartRecording}
                             isSourceConnected={isSourceConnected}
                         />
                     </div>
@@ -3673,31 +4156,74 @@ export default function App() {
             {processingDialog && (
                 <ProcessingDialog
                     isOpen={processingDialog.isOpen}
-                    title={
+                    title={processingDialog.title || (
                         processingDialog.type === 'crop' ? 'Crop Selection' :
                             processingDialog.type === 'normalize' ? 'Normalize Audio' :
-                                processingDialog.type === 'filter' ? 'Apply Multiband Filter' :
-                                    processingDialog.type === 'adsr' ? 'Apply ADSR Processing' :
-                                        processingDialog.type === 'chop-with-processing' ? 'Chop Sample with Pending Changes' :
-                                            processingDialog.type === 'filter-with-crop' ? 'Apply EQ with Pending Crop' :
-                                                processingDialog.type === 'timeStretch-with-crop' ? 'Time Stretch with Pending Crop' :
-                                                    'Process Chops'
-                    }
-                    description={
+                                processingDialog.type === 'noise-reduction' ? 'Reduce Noise' :
+                                    processingDialog.type === 'filter' ? 'Apply Multiband Filter' :
+                                        processingDialog.type === 'adsr' ? 'Apply ADSR Processing' :
+                                            processingDialog.type === 'chop-with-processing' ? 'Chop Sample with Pending Changes' :
+                                                processingDialog.type === 'filter-with-crop' ? 'Apply EQ with Pending Crop' :
+                                                    processingDialog.type === 'timeStretch-with-crop' ? 'Time Stretch with Pending Crop' :
+                                                        'Process Chops'
+                    )}
+                    description={processingDialog.description || (
                         processingDialog.type === 'crop' ? 'Create a new sample from the selected region' :
                             processingDialog.type === 'normalize' ? 'Normalize audio levels to maximum without clipping' :
-                                processingDialog.type === 'filter' ? 'Apply multiband filtering to the sample' :
-                                    processingDialog.type === 'adsr' ? 'Apply ADSR envelope shaping to the sample' :
-                                        processingDialog.type === 'chop-with-processing' ? 'You have region adjustments or EQ settings active. Apply them before chopping?' :
-                                            processingDialog.type === 'filter-with-crop' ? 'You have region adjustments active. Apply the crop as well?' :
-                                                processingDialog.type === 'timeStretch-with-crop' ? 'You have region adjustments active. Apply the crop as well?' :
-                                                    'Create individual samples from chops'
-                    }
+                                processingDialog.type === 'noise-reduction' ? 'Reduce background noise and hiss using spectral gating or RNNoise' :
+                                    processingDialog.type === 'filter' ? 'Apply multiband filtering to the sample' :
+                                        processingDialog.type === 'adsr' ? 'Apply ADSR envelope shaping to the sample' :
+                                            processingDialog.type === 'chop-with-processing' ? 'You have region adjustments or EQ settings active. Apply them before chopping?' :
+                                                processingDialog.type === 'filter-with-crop' ? 'You have region adjustments active. Apply the crop as well?' :
+                                                    processingDialog.type === 'timeStretch-with-crop' ? 'You have region adjustments active. Apply the crop as well?' :
+                                                        'Create individual samples from chops'
+                    )}
                     processingType={processingDialog.type}
                     onConfirm={processingDialog.onConfirm}
                     onApplyAndChop={processingDialog.onApplyAndChop}
                     onApplyWithCrop={processingDialog.onApplyWithCrop}
+                    noiseReductionOptions={{ sensitivity: noiseSensitivity, amount: noiseAmount }}
+                    onNoiseReductionChange={(options) => {
+                        setNoiseSensitivity(options.sensitivity);
+                        setNoiseAmount(options.amount);
+                    }}
                     onCancel={() => setProcessingDialog(null)}
+                />
+            )}
+
+
+            {/* Session Dialog */}
+            <SessionDialog
+                isOpen={sessionDialogMode !== null}
+                mode={sessionDialogMode || 'save'}
+                samples={samples}
+                audioContext={engine?.context || null}
+                onClose={() => setSessionDialogMode(null)}
+                onLoadSession={(loadedSamples) => {
+                    setSamples(loadedSamples);
+                    if (loadedSamples.length > 0) {
+                        setActiveSample(loadedSamples[0].id);
+                    }
+                }}
+            />
+
+            {/* Export Dialog */}
+            {exportDialog && (
+                <ExportDialog
+                    isOpen={exportDialog.isOpen}
+                    mode={exportDialog.mode}
+                    samples={samples}
+                    selectedSampleIds={selectedSampleIds}
+                    activeSampleId={exportDialog.mode === 'save-selected' ? (exportDialog.sampleId || activeSampleId) : activeSampleId}
+                    onClose={() => setExportDialog(null)}
+                    onConfirm={async (options) => {
+                        setExportDialog(null);
+                        if (exportDialog.mode === 'save-selected' && exportDialog.sampleId) {
+                            await performSaveAs(exportDialog.sampleId, options.format, options.sampleRate, options.bitrate);
+                        } else if (exportDialog.mode === 'export-all') {
+                            await performExportAll(options.format, options.sampleRate, options.bitrate, options.exportAsZip);
+                        }
+                    }}
                 />
             )}
         </div>

@@ -1,7 +1,7 @@
 uSampler Extension - Installation Instructions
 ==============================================
 
-Version: 2.3 (DEV)
+Version: 1.0.0
 
 INSTALLATION STEPS:
 -------------------

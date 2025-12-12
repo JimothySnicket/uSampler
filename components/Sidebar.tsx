@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Sample } from '../types';
-import { AudioWaveform, Clock, HardDrive, Search, Trash2, Copy, Edit2, Download, Share2, FolderOpen, Check, X, Save, ChevronRight, ChevronDown } from 'lucide-react';
+import { AudioWaveform, Clock, HardDrive, Trash2, Copy, Edit2, Download, FolderOpen, Check, X, Save, ChevronRight, ChevronDown } from 'lucide-react';
 import { formatDuration } from '../src/utils/audioUtils';
 
 interface SidebarProps {
@@ -17,7 +17,8 @@ interface SidebarProps {
     onRenameSample: (id: string, newName: string) => void;
     onSaveAs: (id: string) => void;
     onExportAll: () => void;
-    onShare: () => void;
+    onSaveSession?: () => void;
+    onLoadSession?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -34,7 +35,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
     onRenameSample,
     onSaveAs,
     onExportAll,
-    onShare
+    onSaveSession,
+    onLoadSession
 }) => {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editName, setEditName] = useState('');
@@ -64,14 +66,29 @@ export const Sidebar: React.FC<SidebarProps> = ({
     return (
         <div className="w-72 bg-zinc-950 border-r border-zinc-800 flex flex-col h-full shrink-0 z-40">
             {/* Header */}
-            <div className="p-4 border-b border-zinc-800">
-                <div className="relative">
-                    <Search className="absolute left-2 top-2 w-4 h-4 text-zinc-500" />
-                    <input
-                        type="text"
-                        placeholder="Search session..."
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-md py-1.5 pl-8 text-sm text-zinc-300 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
-                    />
+            <div className="p-3 border-b border-zinc-800">
+                <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">Session:</span>
+                    {onSaveSession && (
+                        <button
+                            onClick={onSaveSession}
+                            className="flex items-center gap-1 px-2 py-1 bg-green-600/10 hover:bg-green-600/20 text-green-400 hover:text-green-300 rounded border border-green-500/20 hover:border-green-500/40 transition-all text-[10px] font-medium"
+                            title="Save Session"
+                        >
+                            <Save className="w-3 h-3 shrink-0" />
+                            <span>Save</span>
+                        </button>
+                    )}
+                    {onLoadSession && (
+                        <button
+                            onClick={onLoadSession}
+                            className="flex items-center gap-1 px-2 py-1 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 hover:text-blue-300 rounded border border-blue-500/20 hover:border-blue-500/40 transition-all text-[10px] font-medium"
+                            title="Load Session"
+                        >
+                            <FolderOpen className="w-3 h-3 shrink-0" />
+                            <span>Load</span>
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -263,12 +280,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         className="flex items-center justify-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-md text-xs font-medium transition-colors border border-zinc-700"
                     >
                         <Save className="w-3.5 h-3.5" /> Save Copy
-                    </button>
-                    <button
-                        onClick={onShare}
-                        className="flex items-center justify-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-md text-xs font-medium transition-colors border border-zinc-700"
-                    >
-                        <Share2 className="w-3.5 h-3.5" /> Share
                     </button>
                     <button
                         onClick={onExportAll}

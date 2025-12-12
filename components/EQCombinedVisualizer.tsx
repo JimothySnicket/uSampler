@@ -383,3 +383,17 @@ export const EQCombinedVisualizer: React.FC<EQCombinedVisualizerProps> = ({
   );
 };
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+

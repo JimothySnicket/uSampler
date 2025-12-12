@@ -17,7 +17,7 @@ export class AudioEngine {
         this.mediaStreamDestination = null;
 
         // Output Routing (Source -> Effects -> Gain -> Use Playback Analysers -> Destination)
-        this.gainNode = null;
+        this.masterGainNode = null;
         this.playbackSplitter = null;
         this.playbackAnalyserL = null; // Stereo Output L
         this.playbackAnalyserR = null; // Stereo Output R
@@ -45,16 +45,6 @@ export class AudioEngine {
         this.isMonitoringThreshold = false;
         this.thresholdTriggered = false; // Prevent multiple triggers
 
-        // Effects state
-        this.delayTime = 0.3; // seconds
-        this.delayFeedback = 0.3; // 0-1
-        this.delayMix = 0.0; // 0-1
-        this.reverbRoomSize = 0.5; // 0-1
-        this.reverbDamping = 0.5; // 0-1
-        this.reverbMix = 0.0; // 0-1
-        this.delayNode = null;
-        this.reverbConvolver = null;
-
         // EQ state
         this.eqEnabled = true;
         this.lowGain = 0; // dB
@@ -73,10 +63,10 @@ export class AudioEngine {
         this.meterDataR = new Uint8Array(2048);
     }
 
-    initContext() {
-        if (this.context) return;
-
-        this.context = new AudioContext();
+    async initContext() {
+        if (!this.context) {
+            this.context = new (window.AudioContext || window.webkitAudioContext)();
+        }
 
         // --- Input Chain Setup ---
         this.analyserNode = this.context.createAnalyser(); // Main visualizer analyser
@@ -92,8 +82,9 @@ export class AudioEngine {
         this.inputSplitter.connect(this.inputAnalyserL, 0);
         this.inputSplitter.connect(this.inputAnalyserR, 1);
 
-        // Hack: Connect Input Analysers to a silent destination to prevent graph culling
-        // Browsers optimizes away nodes not connected to a destination
+        // Connect Input Analysers to a silent destination to prevent graph culling
+        // Browsers optimize away audio nodes not connected to a destination, which would
+        // cause the analysers to stop processing. This silent gain node keeps them active.
         this.keepAliveGain = this.context.createGain();
         this.keepAliveGain.gain.value = 0.0; // Silence
         this.keepAliveGain.connect(this.context.destination);
@@ -104,8 +95,8 @@ export class AudioEngine {
         this.mediaStreamDestination = this.context.createMediaStreamDestination();
 
         // --- Output Chain Setup ---
-        this.gainNode = this.context.createGain();
-        this.gainNode.gain.value = this.outputVolume;
+        this.masterGainNode = this.context.createGain();
+        this.masterGainNode.gain.value = this.outputVolume;
 
         this.playbackSplitter = this.context.createChannelSplitter(2);
         this.playbackAnalyserL = this.context.createAnalyser();
@@ -113,15 +104,42 @@ export class AudioEngine {
         this.playbackAnalyserL.fftSize = 2048;
         this.playbackAnalyserR.fftSize = 2048;
 
-        // Routing: Gain -> Destination (Main Out)
-        this.gainNode.connect(this.context.destination);
+        // Routing: Master Gain -> Destination (Main Out)
+        this.masterGainNode.connect(this.context.destination);
 
-        // Routing: Gain -> Splitter -> Analysers (Metering)
-        this.gainNode.connect(this.playbackSplitter);
+        // Routing: Master Gain -> Splitter -> Analysers (Metering)
+        this.masterGainNode.connect(this.playbackSplitter);
         this.playbackSplitter.connect(this.playbackAnalyserL, 0);
         this.playbackSplitter.connect(this.playbackAnalyserR, 1);
 
         this.setupMediaRecorder();
+
+        // Initialize AudioWorklet modules
+        await this.initModules();
+
+        // Initialize noise gate
+        await this.createNoiseGate();
+    }
+
+    async initModules() {
+        // Load AudioWorklet modules with timeout to prevent hanging the entire app
+        const loadModule = async () => {
+            try {
+                // Note: In a Vite/Webpack env, we might need to resolve this URL properly.
+                await this.context.audioWorklet.addModule('processors/NoiseGateProcessor.js');
+                return true;
+            } catch (error) {
+                console.error('Error adding audio worklet module:', error);
+                return false;
+            }
+        };
+
+        const timeout = new Promise(resolve => setTimeout(() => {
+            console.warn('AudioWorklet module load timed out');
+            resolve(false);
+        }, 1000));
+
+        await Promise.race([loadModule(), timeout]);
     }
 
     getSampleRate() {
@@ -129,7 +147,7 @@ export class AudioEngine {
     }
 
     async connectStream(streamId) {
-        if (!this.context) this.initContext();
+        if (!this.context) await this.initContext();
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
@@ -154,7 +172,7 @@ export class AudioEngine {
     }
 
     async connectDisplayMedia() {
-        if (!this.context) this.initContext();
+        if (!this.context) await this.initContext();
 
         if (this.sourceNode) {
             console.log("Audio source already connected");
@@ -254,32 +272,58 @@ export class AudioEngine {
         if (this.mediaRecorder && this.mediaRecorder.state === 'inactive') {
             this.recordingBuffer = [];
             this.recordedChunks = [];
-            this.mediaRecorder.start(100);
-            this.state = AudioState.RECORDING;
+            try {
+                this.mediaRecorder.start(100);
+                this.state = AudioState.RECORDING;
 
-            // Safety: Mute output during recording to prevent feedback loops
-            if (this.gainNode) {
-                // We use setTargetAtTime for smooth mute to avoid clicks
-                this.gainNode.gain.setTargetAtTime(0, this.context.currentTime, 0.01);
+                // Safety: Mute output during recording to prevent feedback loops
+                if (this.context && this.masterGainNode) {
+                    try {
+                        this.masterGainNode.gain.setTargetAtTime(0, this.context.currentTime, 0.01);
+                    } catch (e) { console.warn('Failed to mute master gain:', e); }
+                }
+                return true;
+            } catch (e) {
+                console.error('Failed to start MediaRecorder:', e);
+                return false;
             }
         }
+        return false;
     }
 
     stopRecording() {
-        if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-            this.mediaRecorder.stop();
-            this.state = AudioState.IDLE;
+        // ALWAYS reset state to IDLE to ensure UI doesn't get stuck
+        this.state = AudioState.IDLE;
 
-            // Restore volume
-            if (this.gainNode) {
-                this.gainNode.gain.setTargetAtTime(this.outputVolume, this.context.currentTime, 0.01);
+        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+            try {
+                this.mediaRecorder.stop();
+            } catch (e) {
+                console.error('Error stopping MediaRecorder:', e);
             }
+        }
+
+        // Restore volume
+        if (this.context && this.masterGainNode) {
+            try {
+                this.masterGainNode.gain.setTargetAtTime(this.outputVolume, this.context.currentTime, 0.01);
+            } catch (e) { console.warn('Failed to restore volume:', e); }
         }
     }
 
     play(buffer, trimStart, trimEnd, loop = false, playbackRate = 1.0) {
         this.stop();
 
+        // Reset noise gate state when starting new playback to prevent gain accumulation
+        // This ensures clean state when toggling on/off rapidly
+        if (this.noiseGateNode) {
+            // CRITICAL FIX: Disconnect previous connections!
+            try {
+                this.noiseGateNode.disconnect();
+            } catch (e) { /* ignore if not connected */ }
+        }
+
+        // Source setup
         const source = this.context.createBufferSource();
         this.activeSource = source;
         this.isLooping = loop;
@@ -288,8 +332,20 @@ export class AudioEngine {
         source.playbackRate.value = playbackRate;
         this.currentPlaybackRate = playbackRate;
 
-        // Build effects chain
-        let currentNode = source;
+        // -- Create Per-Source Gain for Enveloping/Fading --
+        const sourceGain = this.context.createGain();
+        sourceGain.gain.value = 1.0;
+        source.connect(sourceGain);
+        this.activeSourceGain = sourceGain; // Store for fading
+
+        // Chain starts with sourceGain
+        let currentNode = sourceGain;
+
+        // --- Noise Gate ---
+        if (this.noiseGateNode && this.noiseGateEnabled) {
+            currentNode.connect(this.noiseGateNode);
+            currentNode = this.noiseGateNode;
+        }
 
         // EQ filters (always create filters to allow real-time updates, set gain to 0 if disabled)
         // Low band filter
@@ -319,68 +375,10 @@ export class AudioEngine {
         currentNode.connect(this.highFilter);
         currentNode = this.highFilter;
 
-        // Delay effect
-        if (this.delayMix > 0) {
-            this.delayNode = this.context.createDelay(1.0);
-            this.delayNode.delayTime.value = this.delayTime;
 
-            const delayGain = this.context.createGain();
-            delayGain.gain.value = this.delayFeedback;
-
-            this.delayNode.connect(delayGain);
-            delayGain.connect(this.delayNode);
-
-            const delayMix = this.context.createGain();
-            const dryMix = this.context.createGain();
-            delayMix.gain.value = this.delayMix;
-            dryMix.gain.value = 1 - this.delayMix;
-
-            currentNode.connect(dryMix);
-            currentNode.connect(this.delayNode);
-            this.delayNode.connect(delayMix);
-
-            const delayMerge = this.context.createGain();
-            dryMix.connect(delayMerge);
-            delayMix.connect(delayMerge);
-            currentNode = delayMerge;
-        }
-
-        // Reverb effect
-        if (this.reverbMix > 0) {
-            const reverbMix = this.context.createGain();
-            const dryMix = this.context.createGain();
-            reverbMix.gain.value = this.reverbMix;
-            dryMix.gain.value = 1 - this.reverbMix;
-
-            const reverbDelays = [];
-            const reverbTimes = [0.03, 0.05, 0.07, 0.09];
-
-            for (let i = 0; i < reverbTimes.length; i++) {
-                const delay = this.context.createDelay(0.2);
-                delay.delayTime.value = reverbTimes[i];
-                const gain = this.context.createGain();
-                gain.gain.value = this.reverbDamping * 0.3;
-
-                delay.connect(gain);
-                gain.connect(delay);
-                delay.connect(reverbMix);
-
-                reverbDelays.push(delay);
-            }
-
-            currentNode.connect(dryMix);
-            for (const delay of reverbDelays) {
-                currentNode.connect(delay);
-            }
-
-            const reverbMerge = this.context.createGain();
-            dryMix.connect(reverbMerge);
-            reverbMix.connect(reverbMerge);
-            currentNode = reverbMerge;
-        }
 
         // Connect to Main Output Gain (which routes to Destination and Playback metering)
-        currentNode.connect(this.gainNode);
+        currentNode.connect(this.masterGainNode);
 
         const duration = buffer.duration;
         const start = trimStart * duration;
@@ -409,58 +407,91 @@ export class AudioEngine {
         };
     }
 
-    stop(fadeOut = false) {
-        if (this.activeSource) {
+    stop(fadeOut = false, fadeDuration = 0.005) {
+        // Capture specific source and gain to stop (in case activeSource changes immediately after)
+        const sourceToStop = this.activeSource;
+        const gainToFade = this.activeSourceGain;
+
+        if (sourceToStop) {
             try {
-                if (fadeOut && this.gainNode) {
-                    // Smooth fade out to prevent clicks/pops
-                    const fadeTime = 0.005; // 5ms fade - very quick but smooth
-                    const currentGain = this.gainNode.gain.value;
-                    this.gainNode.gain.cancelScheduledValues(this.context.currentTime);
-                    this.gainNode.gain.setTargetAtTime(0, this.context.currentTime, fadeTime);
-                    
+                if (fadeOut && gainToFade) {
+                    // Smooth fade out on the PER-SOURCE gain node
+                    const currentTime = this.context.currentTime;
+                    // Cancel any scheduled changes
+                    gainToFade.gain.cancelScheduledValues(currentTime);
+                    // Ramp to 0
+                    gainToFade.gain.setValueAtTime(gainToFade.gain.value, currentTime);
+                    gainToFade.gain.linearRampToValueAtTime(0, currentTime + fadeDuration);
+
                     // Stop source after fade
                     setTimeout(() => {
-                        if (this.activeSource && this.activeSource.playbackState !== 'finished') {
-                            try {
-                                this.activeSource.stop();
-                            } catch (e) {
-                                // Source may already be stopped
-                            }
+                        try {
+                            // Only stop if it hasn't finished naturally
+                            // And importantly: we don't nullify activeSource if it has already changed!
+                            sourceToStop.stop();
+                            sourceToStop.disconnect();
+                            if (gainToFade) gainToFade.disconnect();
+                        } catch (e) {
+                            // Ignore
                         }
-                        this.activeSource = null;
-                        // Restore gain for next playback
-                        if (this.gainNode) {
-                            this.gainNode.gain.cancelScheduledValues(this.context.currentTime);
-                            this.gainNode.gain.setTargetAtTime(this.outputVolume, this.context.currentTime, 0.001);
-                        }
-                    }, fadeTime * 1000 + 2);
+                    }, fadeDuration * 1000 + 10);
                 } else {
-                    // Immediate stop (for normal stop operations)
-                    if (this.activeSource.playbackState !== 'finished') {
-                        this.activeSource.stop();
+                    // Immediate stop
+                    try {
+                        sourceToStop.stop();
+                        sourceToStop.disconnect();
+                        if (gainToFade) gainToFade.disconnect();
+                    } catch (e) {
+                        // Ignore
                     }
-                    this.activeSource = null;
                 }
             } catch (e) {
-                // Source may already be stopped or ended, ignore
-                this.activeSource = null;
+                // Ignore
             }
         }
+
+        // Only clear activeSource if we are stopping the CURRENT active source
+        if (this.activeSource === sourceToStop) {
+            this.activeSource = null;
+            this.activeSourceGain = null;
+        }
+
         this.currentPlaybackRate = 1.0;
-        // Don't reset isLooping here - let the caller control it
-        // this.isLooping = false;
     }
 
-    playSnippet(buffer, startPct, durationSec = 0.2) {
-        this.stop();
+    playSnippet(buffer, startPct, durationSec = 0.1) {
+        // Stop previous sound with a very quick fade to avoid clicks (using new per-source fade)
+        this.stop(true, 0.01);
 
         const source = this.context.createBufferSource();
         source.buffer = buffer;
-        source.connect(this.gainNode);
+
+        // Create a dedicated gain node for the snippet envelope
+        const envelopeGain = this.context.createGain();
+        envelopeGain.gain.value = 0;
+
+        source.connect(envelopeGain);
+        envelopeGain.connect(this.masterGainNode);
 
         const start = startPct * buffer.duration;
-        source.start(0, start, durationSec);
+        const now = this.context.currentTime;
+
+        // Micro-fade in (5ms)
+        envelopeGain.gain.setValueAtTime(0, now);
+        envelopeGain.gain.linearRampToValueAtTime(1, now + 0.005);
+
+        // Use provided duration (default shorter for scrubbing) but at least enough for fades
+        // Decrease default duration to 0.1s for snappier scrubbing
+        const actualDuration = Math.max(durationSec, 0.02);
+
+        // Micro-fade out at the end
+        envelopeGain.gain.setValueAtTime(1, now + actualDuration - 0.005);
+        envelopeGain.gain.linearRampToValueAtTime(0, now + actualDuration);
+
+        source.start(now, start, actualDuration);
+
+        this.activeSource = source;
+        this.activeSourceGain = envelopeGain;
     }
 
     getAnalyserData(timeData) {
@@ -547,7 +578,7 @@ export class AudioEngine {
 
     setVolume(val) {
         this.outputVolume = val;
-        if (this.gainNode) this.gainNode.gain.value = val;
+        if (this.masterGainNode) this.masterGainNode.gain.value = val;
     }
 
     processLiveAudio(timeData) {
@@ -686,7 +717,7 @@ export class AudioEngine {
         const sampleRate = buffer.sampleRate;
         const numChannels = buffer.numberOfChannels;
         const length = buffer.length;
-        
+
         // Get mono mix if stereo
         let audioData;
         if (numChannels === 1) {
@@ -710,10 +741,10 @@ export class AudioEngine {
         // Method 1: High Frequency Content (HFC) - excellent for percussive transients
         const hfcValues = [];
         const hfcSampleIndices = [];
-        
+
         // Method 2: Phase Deviation (PD) - detects phase changes (good for sharp attacks)
         const phaseDevValues = [];
-        
+
         // Method 3: Energy-based (RMS)
         const energyValues = [];
 
@@ -723,19 +754,19 @@ export class AudioEngine {
             let hfc = 0;
             let phaseDev = 0;
             let prevPhase = null;
-            
+
             // Calculate window features
             for (let j = 0; j < windowSize && i + j < length; j++) {
                 const sample = audioData[i + j];
                 energy += sample * sample;
-                
+
                 // HFC: Weight by frequency (higher frequencies weighted more)
                 // Approximate with differentiation (high-pass filter)
                 if (j > 0) {
                     const diff = sample - audioData[i + j - 1];
                     hfc += diff * diff * (j + 1); // Weight increases with position (simulates frequency weighting)
                 }
-                
+
                 // Phase Deviation: Detect phase changes (good for sharp attacks)
                 if (j > 1) {
                     // Approximate phase using Hilbert transform approximation
@@ -750,11 +781,11 @@ export class AudioEngine {
                     prevPhase = currentPhase;
                 }
             }
-            
+
             const rms = Math.sqrt(energy / windowSize);
             const hfcNorm = Math.sqrt(hfc / (windowSize * windowSize)); // Normalize HFC
             const pdNorm = phaseDev / Math.max(windowSize - 2, 1); // Normalize phase deviation
-            
+
             // Normalize each method to 0-1 range
             hfcValues.push(hfcNorm);
             phaseDevValues.push(pdNorm);
@@ -770,11 +801,11 @@ export class AudioEngine {
         let maxHFC = Math.max(...hfcValues);
         let maxPD = Math.max(...phaseDevValues);
         let maxEnergy = Math.max(...energyValues);
-        
+
         if (maxHFC === 0) maxHFC = 1;
         if (maxPD === 0) maxPD = 1;
         if (maxEnergy === 0) maxEnergy = 1;
-        
+
         const normalizedHFC = hfcValues.map(v => v / maxHFC);
         const normalizedPD = phaseDevValues.map(v => v / maxPD);
         const normalizedEnergy = energyValues.map(v => v / maxEnergy);
@@ -783,7 +814,7 @@ export class AudioEngine {
         const hfcOnset = [];
         const pdOnset = [];
         const energyOnset = [];
-        
+
         for (let i = 1; i < normalizedHFC.length; i++) {
             // Only positive differences (energy increases)
             hfcOnset.push(Math.max(0, normalizedHFC[i] - normalizedHFC[i - 1]));
@@ -821,7 +852,7 @@ export class AudioEngine {
         // Step 4: Calculate BPM-based scores if available
         const detectedBPM = options.detectedBPM || null;
         const bpmConfidence = options.bpmConfidence || 0;
-        
+
         let bpmWeight = options.bpmWeight;
         if (bpmWeight === undefined) {
             if (detectedBPM && bpmConfidence > 0.7) {
@@ -840,7 +871,7 @@ export class AudioEngine {
             const beatInterval = (60 / detectedBPM) * sampleRate;
             const toleranceWindow = beatInterval * beatTolerance;
             const beatGrid = [];
-            
+
             for (let beatPos = 0; beatPos < length; beatPos += beatInterval) {
                 beatGrid.push(Math.round(beatPos));
             }
@@ -868,8 +899,15 @@ export class AudioEngine {
             return (onset * transientWeight) + (beatScores[i] * bpmWeight);
         });
 
-        // Step 6: Percentile-based threshold (higher percent = fewer chops)
+        // Step 6: Percentile-based threshold
+        // Higher thresholdPercent = fewer chops (more selective, only top transients)
+        // Lower thresholdPercent = more chops (less selective, includes quieter transients)
+        // Scores are sorted descending (highest first)
         const sortedScores = [...combinedScores].sort((a, b) => b - a);
+        // For descending array: lower index = higher score = higher threshold = fewer chops
+        // thresholdPercent 100 = index near 0 (top scores only, most selective)
+        // thresholdPercent 1 = index near end (includes lower scores, least selective = more chops)
+        // Invert: (1 - thresholdPercent/100) so lower thresholdPercent gives higher index = lower threshold = more chops
         const percentileIndex = Math.floor(sortedScores.length * (1 - thresholdPercent / 100));
         const threshold = sortedScores[Math.max(0, Math.min(percentileIndex, sortedScores.length - 1))] || 0;
 
@@ -877,13 +915,13 @@ export class AudioEngine {
         // Calculate local energy averages aligned with analysis windows
         const localEnergyWindow = Math.floor(sampleRate * 0.05); // 50ms window for local energy
         const localEnergyAverages = [];
-        
+
         // Calculate local energy for each analysis window (aligned with hfcSampleIndices)
         for (let i = 0; i < hfcSampleIndices.length; i++) {
             const centerSample = hfcSampleIndices[i];
             const windowStart = Math.max(0, centerSample - Math.floor(localEnergyWindow / 2));
             const windowEnd = Math.min(length, centerSample + Math.floor(localEnergyWindow / 2));
-            
+
             let sum = 0;
             let count = 0;
             for (let j = windowStart; j < windowEnd; j++) {
@@ -892,29 +930,29 @@ export class AudioEngine {
             }
             localEnergyAverages.push(count > 0 ? sum / count : 0);
         }
-        
+
         // Calculate global energy statistics
         const globalEnergyAvg = localEnergyAverages.reduce((a, b) => a + b, 0) / localEnergyAverages.length;
         const sustainedEnergyThreshold = globalEnergyAvg * 1.5; // 50% above average = sustained
-        
+
         const candidateOnsets = [];
         for (let i = 2; i < combinedScores.length - 2; i++) {
             // Require local maximum with stronger neighbors check
-            if (combinedScores[i] > threshold && 
-                combinedScores[i] > combinedScores[i - 1] && 
+            if (combinedScores[i] > threshold &&
+                combinedScores[i] > combinedScores[i - 1] &&
                 combinedScores[i] > combinedScores[i + 1] &&
                 combinedScores[i] > combinedScores[i - 2] * 1.1 && // At least 10% higher than neighbors
                 combinedScores[i] > combinedScores[i + 2] * 1.1) {
-                
+
                 const sampleIndex = hfcSampleIndices[i + 1];
                 const localEnergyIndex = i + 1; // Aligned with hfcSampleIndices
-                const localEnergy = localEnergyIndex < localEnergyAverages.length 
-                    ? localEnergyAverages[localEnergyIndex] 
+                const localEnergy = localEnergyIndex < localEnergyAverages.length
+                    ? localEnergyAverages[localEnergyIndex]
                     : globalEnergyAvg;
-                
+
                 // Check if we're in a sustained high-energy region
                 const isSustainedHighEnergy = localEnergy > sustainedEnergyThreshold;
-                
+
                 // Calculate attack strength: how much energy increased relative to recent average
                 const lookbackWindow = Math.min(10, i); // Look back up to 10 frames
                 let recentAvgEnergy = 0;
@@ -927,18 +965,18 @@ export class AudioEngine {
                     }
                 }
                 recentAvgEnergy = recentCount > 0 ? recentAvgEnergy / recentCount : globalEnergyAvg;
-                
+
                 // Calculate energy increase ratio
-                const energyIncreaseRatio = recentAvgEnergy > 0 
-                    ? localEnergy / recentAvgEnergy 
+                const energyIncreaseRatio = recentAvgEnergy > 0
+                    ? localEnergy / recentAvgEnergy
                     : 1;
-                
+
                 // For sustained high-energy regions, require stronger transient indicators
                 // Check HFC and Phase Deviation relative to energy (these indicate sharp attacks)
                 const hfcRatio = normalizedHFC[i] / Math.max(normalizedEnergy[i], 0.001);
                 const pdRatio = normalizedPD[i] / Math.max(normalizedEnergy[i], 0.001);
                 const transientStrength = (hfcRatio + pdRatio) / 2;
-                
+
                 // Filter criteria:
                 // 1. If NOT in sustained high-energy: accept if above threshold
                 // 2. If IN sustained high-energy: only accept if:
@@ -946,7 +984,7 @@ export class AudioEngine {
                 //    - Strong transient indicators (HFC/PD relative to energy) indicating beat/plosive
                 const hasSignificantAttack = energyIncreaseRatio > 1.3; // 30% increase
                 const hasStrongTransient = transientStrength > 0.6; // HFC/PD significantly higher than energy
-                
+
                 if (!isSustainedHighEnergy || hasSignificantAttack || hasStrongTransient) {
                     candidateOnsets.push({
                         index: sampleIndex,
@@ -963,12 +1001,12 @@ export class AudioEngine {
         for (const onset of candidateOnsets) {
             let detectedPeak = onset.index;
             const lookbackStart = Math.max(0, detectedPeak - lookbackSamples);
-            
+
             // Instead of finding minimum energy, find where energy starts rising significantly
             // Look for the point where energy begins to increase before the detected peak
             let attackStart = detectedPeak;
             const peakEnergy = Math.abs(audioData[detectedPeak]);
-            
+
             // Calculate a threshold for "quiet" - use the minimum energy in the lookback window
             let minEnergyInWindow = peakEnergy;
             for (let i = detectedPeak; i >= lookbackStart && i >= 0; i--) {
@@ -977,24 +1015,24 @@ export class AudioEngine {
                     minEnergyInWindow = energy;
                 }
             }
-            
+
             // Define quiet threshold as slightly above minimum (to avoid noise floor)
             const quietThreshold = minEnergyInWindow * 1.2;
             const attackThreshold = minEnergyInWindow + (peakEnergy - minEnergyInWindow) * 0.15; // 15% of way to peak
-            
+
             // Scan backward to find where energy starts rising from quiet
             let foundRisingEdge = false;
             let lastEnergy = peakEnergy;
-            
+
             for (let i = detectedPeak; i >= lookbackStart && i >= 0; i--) {
                 const energy = Math.abs(audioData[i]);
-                
+
                 // If we're still near peak, continue scanning
                 if (energy > peakEnergy * 0.7) {
                     lastEnergy = energy;
                     continue;
                 }
-                
+
                 // Look for rising edge: energy was quiet, now increasing
                 if (!foundRisingEdge) {
                     // Check if energy is rising (current > previous) and above attack threshold
@@ -1011,10 +1049,10 @@ export class AudioEngine {
                         break;
                     }
                 }
-                
+
                 lastEnergy = energy;
             }
-            
+
             // Fallback: if we didn't find a clear rising edge, use the point with minimum energy
             // but only if it's significantly lower than the peak
             if (!foundRisingEdge && minEnergyInWindow < peakEnergy * 0.5) {
@@ -1026,12 +1064,12 @@ export class AudioEngine {
                     }
                 }
             }
-            
+
             chopPoints.push(attackStart);
         }
 
         // Step 9: Enforce minimum interval and sort
-        const minInterval = detectedBPM 
+        const minInterval = detectedBPM
             ? Math.floor((60 / detectedBPM) / 4 * sampleRate)
             : Math.floor(sampleRate * 0.08); // 80ms minimum for better spacing
 
@@ -1185,61 +1223,7 @@ export class AudioEngine {
             currentNode = highFilter;
         }
 
-        if (this.delayMix > 0) {
-            const delayNode = offlineContext.createDelay(1.0);
-            delayNode.delayTime.value = this.delayTime;
 
-            const delayGain = offlineContext.createGain();
-            delayGain.gain.value = this.delayFeedback;
-            delayNode.connect(delayGain);
-            delayGain.connect(delayNode);
-
-            const delayMix = offlineContext.createGain();
-            const dryMix = offlineContext.createGain();
-            delayMix.gain.value = this.delayMix;
-            dryMix.gain.value = 1 - this.delayMix;
-
-            currentNode.connect(dryMix);
-            currentNode.connect(delayNode);
-            delayNode.connect(delayMix);
-
-            const delayMerge = offlineContext.createGain();
-            dryMix.connect(delayMerge);
-            delayMix.connect(delayMerge);
-            currentNode = delayMerge;
-        }
-
-        if (this.reverbMix > 0) {
-            const reverbMix = offlineContext.createGain();
-            const dryMix = offlineContext.createGain();
-            reverbMix.gain.value = this.reverbMix;
-            dryMix.gain.value = 1 - this.reverbMix;
-
-            const reverbDelays = [];
-            const reverbTimes = [0.03, 0.05, 0.07, 0.09];
-
-            for (let i = 0; i < reverbTimes.length; i++) {
-                const delay = offlineContext.createDelay(0.2);
-                delay.delayTime.value = reverbTimes[i];
-                const gain = offlineContext.createGain();
-                gain.gain.value = this.reverbDamping * 0.3;
-
-                delay.connect(gain);
-                gain.connect(delay);
-                delay.connect(reverbMix);
-                reverbDelays.push(delay);
-            }
-
-            currentNode.connect(dryMix);
-            for (const delay of reverbDelays) {
-                currentNode.connect(delay);
-            }
-
-            const reverbMerge = offlineContext.createGain();
-            dryMix.connect(reverbMerge);
-            reverbMix.connect(reverbMerge);
-            currentNode = reverbMerge;
-        }
 
         currentNode.connect(offlineContext.destination);
         source.start(0);
@@ -1247,20 +1231,8 @@ export class AudioEngine {
         return await offlineContext.startRendering();
     }
 
-    setDelay(time, feedback, mix) {
-        this.delayTime = time;
-        this.delayFeedback = feedback;
-        this.delayMix = mix;
-        if (this.delayNode) {
-            this.delayNode.delayTime.value = time;
-        }
-    }
 
-    setReverb(roomSize, damping, mix) {
-        this.reverbRoomSize = roomSize;
-        this.reverbDamping = damping;
-        this.reverbMix = mix;
-    }
+
 
     setEQ(params) {
         if (params.enabled !== undefined) {
@@ -1318,6 +1290,139 @@ export class AudioEngine {
                 this.highFilter.frequency.setTargetAtTime(Math.max(4000, Math.min(20000, this.highFreq)), this.context.currentTime, 0.01);
             }
         }
+    }
+
+    // --- Live Noise Gate ---
+    async createNoiseGate() {
+        if (!this.context) return;
+
+        try {
+            // Create AudioWorkletNode
+            this.noiseGateNode = new AudioWorkletNode(this.context, 'noise-gate-processor');
+
+            // Initial parameters
+            const sensitivity = this.noiseGateSensitivity || 0.5;
+            const amount = this.noiseGateAmount || 0.5;
+            const enabled = this.noiseGateEnabled ? 1 : 0;
+
+            const thresholdParam = this.noiseGateNode.parameters.get('threshold');
+            const amountParam = this.noiseGateNode.parameters.get('amount');
+            const enabledParam = this.noiseGateNode.parameters.get('enabled');
+
+            if (thresholdParam) thresholdParam.setValueAtTime(sensitivity, this.context.currentTime);
+            if (amountParam) amountParam.setValueAtTime(amount, this.context.currentTime);
+            if (enabledParam) enabledParam.setValueAtTime(enabled, this.context.currentTime);
+
+            // Error handling
+            this.noiseGateNode.onprocessorerror = (err) => {
+                console.error('NoiseGateProcessor error:', err);
+            };
+
+        } catch (e) {
+            console.error('Failed to create NoiseGateProcessor worklet node:', e);
+            // Fallback to bypass or script processor if absolutely necessary (omitted for now)
+        }
+    }
+
+    applyNoiseGateOffline(buffer, sensitivity, amount) {
+        const numChannels = buffer.numberOfChannels;
+        const length = buffer.length;
+        const newBuffer = this.context.createBuffer(numChannels, length, buffer.sampleRate);
+
+        const inBuffers = [];
+        const outBuffers = [];
+        for (let ch = 0; ch < numChannels; ch++) {
+            inBuffers.push(buffer.getChannelData(ch));
+            outBuffers.push(newBuffer.getChannelData(ch));
+        }
+
+        const minThresh = 0.001;
+        const maxThresh = 0.5;
+        const threshold = minThresh + (sensitivity * (maxThresh - minThresh));
+
+        // Initialize state for smoothing
+        let currentGain = 1.0;
+        let envelope = 0.0;
+        const envAttack = 0.99;
+        const envRelease = 0.9995;
+
+        for (let i = 0; i < length; i++) {
+            // Per-sample processing
+
+            // Envelope detection (using first channel)
+            const sample = Math.abs(inBuffers[0][i]); // Use first channel for envelope detection
+            if (sample > envelope) {
+                envelope = envAttack * envelope + (1 - envAttack) * sample;
+            } else {
+                envelope = envRelease * envelope + (1 - envRelease) * sample;
+            }
+
+            // Calculate Target Gain
+            let targetGain = 1.0;
+            if (envelope < threshold && threshold > 0) {
+                const ratio = Math.max(0, envelope / threshold);
+                targetGain = 1.0 - (amount * (1.0 - ratio));
+            }
+
+            // Clamp Target
+            targetGain = Math.max(0.0, Math.min(1.0, targetGain));
+
+            // Apply smoothing
+            const isOpening = targetGain > currentGain;
+            // Release (Closing to silence) -> Slow (retain gain) - wait, this is reversed logic for "Release" term
+            // Gate Opening (Silence to Sound) -> Fast attack
+            // Gate Closing (Sound to Silence) -> Slow release
+
+            const alpha = isOpening ? 0.005 : 0.9992;
+            currentGain = currentGain * alpha + targetGain * (1.0 - alpha);
+
+            currentGain = Math.max(0.0, Math.min(1.0, currentGain));
+
+            // Apply to all channels
+            for (let ch = 0; ch < numChannels; ch++) {
+                const funcInData = inBuffers[ch];
+                const funcOutData = outBuffers[ch];
+                funcOutData[i] = funcInData[i] * currentGain;
+            }
+        }
+        return newBuffer;
+    }
+
+    setNoiseGate(enabled = false, sensitivity = 0.5, amount = 0.5) {
+        const enabledChanged = this.noiseGateEnabled !== enabled;
+        const settingsChanged =
+            enabledChanged ||
+            this.noiseGateSensitivity !== sensitivity ||
+            this.noiseGateAmount !== amount;
+
+        this.noiseGateEnabled = enabled;
+        this.noiseGateSensitivity = sensitivity;
+        this.noiseGateAmount = amount;
+
+        if (this.context && this.noiseGateNode instanceof AudioWorkletNode) {
+            try {
+                const thresholdParam = this.noiseGateNode.parameters.get('threshold');
+                const amountParam = this.noiseGateNode.parameters.get('amount');
+                const enabledParam = this.noiseGateNode.parameters.get('enabled');
+
+                // Ramp to new values to avoid zipper noise on parameter change
+                if (thresholdParam) thresholdParam.setTargetAtTime(sensitivity, this.context.currentTime, 0.02);
+                if (amountParam) amountParam.setTargetAtTime(amount, this.context.currentTime, 0.02);
+                // Use setValueAtTime for immediate toggle, or excessively fast ramp
+                if (enabledParam) enabledParam.setValueAtTime(enabled ? 1 : 0, this.context.currentTime);
+            } catch (e) {
+                console.warn('Error setting noise gate parameters:', e);
+            }
+        } else {
+            // Legacy fallback logic
+            if (settingsChanged) {
+                this.noiseGateCurrentGain = 1.0;
+            }
+            if (enabledChanged) {
+                this.noiseGateCurrentGain = 1.0;
+            }
+        }
+
     }
 
     bufferToBlob(buffer) {
@@ -1425,8 +1530,8 @@ export class AudioEngine {
      */
     async timeStretch(buffer, stretchRatio, onProgress = null) {
         const { timeStretch } = await import('../utils/timeStretcher.js');
-        return await timeStretch(buffer, { 
-            stretchRatio, 
+        return await timeStretch(buffer, {
+            stretchRatio,
             method: 'simple',
             onProgress: onProgress || undefined
         });
@@ -1444,28 +1549,30 @@ export class AudioEngine {
         return await timeStretchWithPitch(buffer, stretchRatio, pitchShiftSemitones);
     }
 
-    // --- Stem Separation Methods ---
+    // --- Noise Reduction Methods ---
 
     /**
-     * Separate audio into stems (vocals, drums, bass, other)
-     * @param {AudioBuffer} buffer - Audio buffer to separate
-     * @param {object} options - Separation options
-     * @returns {Promise<{vocals?: AudioBuffer, drums?: AudioBuffer, bass?: AudioBuffer, other?: AudioBuffer} | null>}
+     * Reduce noise in audio buffer
+     * @param {AudioBuffer} buffer - Audio buffer to process
+     * @param {object} options - Processing options
+     * @param {string} options.method - 'rnnoise' or 'spectral' (default: 'spectral')
+     * @param {number} options.aggressiveness - 0-1, higher = more aggressive (default: 0.5)
+     * @returns {Promise<AudioBuffer>}
      */
-    async separateStems(buffer, options = {}) {
-        const { separateStems } = await import('../utils/stemSeparator.js');
-        return await separateStems(buffer, options);
+    async reduceNoise(buffer, options = {}) {
+        const { reduceNoise } = await import('../utils/noiseReduction.js');
+        return await reduceNoise(buffer, options);
     }
 
     /**
-     * Separate stems using server-side processing
-     * @param {AudioBuffer} buffer - Audio buffer to separate
-     * @param {string} apiEndpoint - Server API endpoint
-     * @param {object} options - Separation options
-     * @returns {Promise<{vocals?: AudioBuffer, drums?: AudioBuffer, bass?: AudioBuffer, other?: AudioBuffer} | null>}
+     * Reduce noise with progress callback
+     * @param {AudioBuffer} buffer - Audio buffer to process
+     * @param {object} options - Processing options
+     * @param {Function} onProgress - Progress callback (0-1)
+     * @returns {Promise<AudioBuffer>}
      */
-    async separateStemsServer(buffer, apiEndpoint, options = {}) {
-        const { separateStemsServer } = await import('../utils/stemSeparator.js');
-        return await separateStemsServer(buffer, options, apiEndpoint);
+    async reduceNoiseWithProgress(buffer, options = {}, onProgress = null) {
+        const { reduceNoiseWithProgress } = await import('../utils/noiseReduction.js');
+        return await reduceNoiseWithProgress(buffer, options, onProgress);
     }
 }

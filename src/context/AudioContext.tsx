@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { AudioEngine, AudioState } from '../core/AudioEngine.js';
 
 interface AudioContextType {
@@ -56,6 +56,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 engine.stopThresholdMonitoring();
                 engine.startRecording();
                 setState(AudioState.RECORDING);
+                // Disarm when recording starts automatically from threshold
+                setIsArmed(false);
             }
         };
     }, []);
@@ -92,44 +94,60 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const selectSource = async (): Promise<boolean> => {
         if (engineRef.current) {
-            const success = await engineRef.current.connectDisplayMedia();
-            if (success) {
-                console.log('[AudioContext] Source connected, Auto-Arming...');
-                // Atomic State Transition: Auto-Arm immediately
-                if (state !== AudioState.RECORDING) {
-                    setState(AudioState.ARMED);
-                    engineRef.current.state = AudioState.ARMED;
-                    setIsArmed(true);
-                    engineRef.current.startThresholdMonitoring();
+            try {
+                const success = await engineRef.current.connectDisplayMedia();
+                if (success) {
+                    console.log('[AudioContext] Source connected, Auto-Arming...');
+                    // Atomic State Transition: Auto-Arm immediately
+                    if (state !== AudioState.RECORDING) {
+                        setState(AudioState.ARMED);
+                        engineRef.current.state = AudioState.ARMED;
+                        setIsArmed(true);
+                        engineRef.current.startThresholdMonitoring();
+                    }
+                    return true;
                 }
-                return true;
+            } catch (err) {
+                console.error('[AudioContext] Error selecting source:', err);
             }
         }
         return false;
     };
 
-    const toggleArm = () => {
-        if (!engineRef.current) return;
+    const toggleArm = useCallback(() => {
+        const engine = engineRef.current;
+        if (!engine) return;
 
+        // Atomic state update - update all states synchronously
         if (state === AudioState.IDLE) {
-            setState(AudioState.ARMED);
-            engineRef.current.state = AudioState.ARMED;
+            // Arm: Update React state first for immediate visual feedback
             setIsArmed(true);
-            engineRef.current.startThresholdMonitoring();
+            setState(AudioState.ARMED);
+            // Then update engine state and start monitoring
+            engine.state = AudioState.ARMED;
+            engine.startThresholdMonitoring();
         } else if (state === AudioState.ARMED) {
-            setState(AudioState.IDLE);
-            engineRef.current.state = AudioState.IDLE;
+            // Disarm: Update React state first for immediate visual feedback
             setIsArmed(false);
-            engineRef.current.stopThresholdMonitoring();
+            setState(AudioState.IDLE);
+            // Then update engine state and stop monitoring
+            engine.state = AudioState.IDLE;
+            engine.stopThresholdMonitoring();
         }
-    };
+    }, [state]);
 
     const startRecording = () => {
         if (engineRef.current) {
             engineRef.current.stopThresholdMonitoring();
-            engineRef.current.startRecording();
-            setState(AudioState.RECORDING);
-            setIsArmed(true);
+            const started = engineRef.current.startRecording();
+            if (started) {
+                setState(AudioState.RECORDING);
+                // Disarm when recording starts - user can re-arm for next sample if needed
+                setIsArmed(false);
+            } else {
+                console.error('[AudioContext] Failed to start recording');
+                setState(AudioState.IDLE);
+            }
         }
     };
 
@@ -137,6 +155,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         console.log('[AudioContext] stopRecording called');
         if (engineRef.current && state === AudioState.RECORDING) {
             engineRef.current.stopRecording();
+            // Force state update to ensure UI doesn't get stuck if callback fails
+            setState(AudioState.IDLE);
         }
     };
 

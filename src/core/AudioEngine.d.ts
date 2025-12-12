@@ -15,7 +15,7 @@ export declare class AudioEngine {
     playbackSplitter: ChannelSplitterNode | null;
     playbackAnalyserL: AnalyserNode | null;
     playbackAnalyserR: AnalyserNode | null;
-    gainNode: GainNode | null;
+    masterGainNode: GainNode | null;
     mediaStreamDestination: MediaStreamAudioDestinationNode | null;
     mediaRecorder: MediaRecorder | null;
     state: string;
@@ -34,10 +34,10 @@ export declare class AudioEngine {
     isMonitoringThreshold: boolean;
 
     constructor();
-    initContext(): void;
+    initContext(): Promise<void>;
     connectStream(streamId: string): Promise<boolean>;
     connectDisplayMedia(): Promise<boolean>;
-    startRecording(): void;
+    startRecording(): boolean;
     stopRecording(): void;
     play(buffer: AudioBuffer, trimStart: number, trimEnd: number, loop: boolean, playbackRate?: number): void;
     stop(fadeOut?: boolean): void;
@@ -66,8 +66,7 @@ export declare class AudioEngine {
     createChops(buffer: AudioBuffer, chopPoints: number[]): Array<{ buffer: AudioBuffer; startFrame: number; endFrame: number; startTime: number; endTime: number }>;
     equalDivide(buffer: AudioBuffer, sliceCount: number): Array<{ buffer: AudioBuffer; startFrame: number; endFrame: number; startTime: number; endTime: number }>;
     applyEffectsAndResample(buffer: AudioBuffer, targetSampleRate?: number | null): Promise<AudioBuffer>;
-    setDelay(time: number, feedback: number, mix: number): void;
-    setReverb(roomSize: number, damping: number, mix: number): void;
+
     setEQ(params: {
         enabled?: boolean;
         lowGain?: number;
@@ -85,6 +84,6 @@ export declare class AudioEngine {
     analyzeAudio(buffer: AudioBuffer): Promise<{ key: { key: string; mode: string; confidence: number } | null; bpm: { bpm: number; threshold: number } | null }>;
     timeStretch(buffer: AudioBuffer, stretchRatio: number, onProgress?: ((progress: number) => void) | null): Promise<AudioBuffer>;
     timeStretchWithPitch(buffer: AudioBuffer, stretchRatio: number, pitchShiftSemitones: number): Promise<AudioBuffer>;
-    separateStems(buffer: AudioBuffer, options?: { modelType?: '2stems' | '4stems' | '5stems'; quality?: 'low' | 'medium' | 'high'; useServer?: boolean }): Promise<{ vocals?: AudioBuffer; drums?: AudioBuffer; bass?: AudioBuffer; other?: AudioBuffer; accompaniment?: AudioBuffer } | null>;
-    separateStemsServer(buffer: AudioBuffer, apiEndpoint: string, options?: { modelType?: '2stems' | '4stems' | '5stems'; quality?: 'low' | 'medium' | 'high' }): Promise<{ vocals?: AudioBuffer; drums?: AudioBuffer; bass?: AudioBuffer; other?: AudioBuffer; accompaniment?: AudioBuffer } | null>;
+    reduceNoise(buffer: AudioBuffer, options?: { method?: 'rnnoise' | 'spectral'; aggressiveness?: number }): Promise<AudioBuffer>;
+    reduceNoiseWithProgress(buffer: AudioBuffer, options?: { method?: 'rnnoise' | 'spectral'; aggressiveness?: number }, onProgress?: ((progress: number) => void) | null): Promise<AudioBuffer>;
 }

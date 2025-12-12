@@ -1,13 +1,16 @@
 {
     "manifest_version": 3,
     "name": "uSampler",
-    "version": "1.0.4",
+    "version": "1.0.0",
     "description": "High-fidelity sampler and audio recorder.",
     "permissions": [
         "tabCapture",
         "activeTab",
+        "tabs",
         "scripting",
-        "windows"
+        "windows",
+        "downloads",
+        "storage"
     ],
     "action": {
         "default_title": "Open Sampler"
@@ -22,5 +25,16 @@
     },
     "content_security_policy": {
         "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
-    }
+    },
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "processors/*",
+                "lame.all.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ]
 }

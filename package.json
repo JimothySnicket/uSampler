@@ -1,23 +1,27 @@
 {
   "name": "usampler",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "type-check": "tsc --noEmit",
     "prebuild": "npm run type-check",
     "build": "vite build",
+    "build:debug": "vite build --config vite.config.debug.ts",
     "build:watch": "tsc --watch & vite build --watch",
     "preview": "vite preview"
   },
   "dependencies": {
     "@types/jszip": "^3.4.0",
+    "clsx": "^2.1.1",
     "jszip": "^3.10.1",
+    "lamejs": "^1.2.1",
     "lucide-react": "^0.556.0",
-    "motion": "^11.11.17",
+    "motion": "^12.23.26",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
+    "tailwind-merge": "^3.4.0",
     "zustand": "^5.0.9"
   },
   "devDependencies": {

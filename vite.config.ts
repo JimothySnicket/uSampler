@@ -19,10 +19,21 @@ export default defineConfig({
         assetFileNames: 'assets/[name]-[hash].[ext]',
         // Inline all chunks to avoid blob URLs
         inlineDynamicImports: false,
-        manualChunks: undefined
+        manualChunks: {
+          'vendor-icons': ['lucide-react'],
+          'vendor-react': ['react', 'react-dom'],
+        }
       }
     },
     // Increase chunk size limit to reduce splitting
-    chunkSizeWarningLimit: 1000
+    chunkSizeWarningLimit: 1000,
+    // Ensure CommonJS modules are properly handled
+    commonjsOptions: {
+      include: [/lamejs/, /node_modules/],
+      transformMixedEsModules: true
+    }
+  },
+  optimizeDeps: {
+    include: ['lamejs']
   }
 });

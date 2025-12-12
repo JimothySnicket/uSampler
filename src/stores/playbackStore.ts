@@ -37,19 +37,18 @@ interface PlaybackState {
     isPlaying: boolean;
     isLooping: boolean;
     playbackTime: { current: number; total: number };
-    
+
     // Per-sample state map (using Record instead of Map for Zustand compatibility)
     sampleStates: Record<string, SampleState>;
-    
+
     // Effects (global, reset on sample change)
     eqSettings: EQSettings;
     timeStretchRatio: number;
     timeStretchEnabled: boolean;
     adsrSettings: ADSRSettings;
-    delayMix: number;
-    reverbMix: number;
+
     isPreviewingStretch: boolean;
-    
+
     // Actions
     setActiveSample: (sampleId: string) => void;
     setRegion: (sampleId: string, region: Region) => void;
@@ -60,18 +59,18 @@ interface PlaybackState {
     setPlaybackTime: (time: { current: number; total: number }) => void;
     resetEffects: () => void;
     syncWithEngine: (engine: AudioEngine | null) => void;
-    
+
     // Getters
     getSampleRegion: (sampleId: string) => Region;
     getSampleChops: (sampleId: string) => Chop[];
     getActiveChopId: (sampleId: string) => string | null;
-    
+
     // EQ actions
     setEQEnabled: (enabled: boolean) => void;
     setEQGain: (band: 'low' | 'mid' | 'high', gain: number) => void;
     setEQFreq: (band: 'low' | 'mid' | 'high', freq: number) => void;
     setMidQ: (q: number) => void;
-    
+
     // Time stretch
     setTimeStretchRatio: (ratio: number) => void;
     setTimeStretchEnabled: (enabled: boolean) => void;
@@ -118,47 +117,46 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     timeStretchRatio: 1.0,
     timeStretchEnabled: false,
     adsrSettings: defaultADSRSettings,
-    delayMix: 0,
-    reverbMix: 0,
+
     isPreviewingStretch: false,
-    
+
     // Getters
     getSampleRegion: (sampleId: string) => {
         const state = get().sampleStates[sampleId];
         return state?.region || { start: 0, end: 1 };
     },
-    
+
     getSampleChops: (sampleId: string) => {
         const state = get().sampleStates[sampleId];
         return state?.chops || [];
     },
-    
+
     getActiveChopId: (sampleId: string) => {
         const state = get().sampleStates[sampleId];
         return state?.activeChopId || null;
     },
-    
+
     // Actions
     setActiveSample: (sampleId: string) => {
         const currentState = get();
-        
+
         // Save current sample's state before switching
         if (currentState.activeSampleId) {
             const currentSampleState = currentState.sampleStates[currentState.activeSampleId] || defaultSampleState;
             const newSampleStates = { ...currentState.sampleStates };
             newSampleStates[currentState.activeSampleId] = currentSampleState;
-            
+
             set({
                 sampleStates: newSampleStates,
             });
         }
-        
+
         // Load or initialize state for new sample
         const newSampleStates = { ...currentState.sampleStates };
         if (!newSampleStates[sampleId]) {
             newSampleStates[sampleId] = { ...defaultSampleState };
         }
-        
+
         // Reset effects when switching samples (but preserve loop state)
         set({
             activeSampleId: sampleId,
@@ -166,13 +164,12 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
             eqSettings: defaultEQSettings,
             timeStretchRatio: 1.0,
             timeStretchEnabled: false,
-            delayMix: 0,
-            reverbMix: 0,
+
             isPreviewingStretch: false,
             // Don't reset isLooping - preserve user's loop preference
         });
     },
-    
+
     setRegion: (sampleId: string, region: Region) => {
         const currentState = get();
         const sampleState = currentState.sampleStates[sampleId] || { ...defaultSampleState };
@@ -183,7 +180,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
         };
         set({ sampleStates: newSampleStates });
     },
-    
+
     setChops: (sampleId: string, chops: Chop[]) => {
         const currentState = get();
         const sampleState = currentState.sampleStates[sampleId] || { ...defaultSampleState };
@@ -194,7 +191,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
         };
         set({ sampleStates: newSampleStates });
     },
-    
+
     setActiveChopId: (sampleId: string, chopId: string | null) => {
         const currentState = get();
         const sampleState = currentState.sampleStates[sampleId] || { ...defaultSampleState };
@@ -205,30 +202,29 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
         };
         set({ sampleStates: newSampleStates });
     },
-    
+
     setLooping: (looping: boolean) => {
         set({ isLooping: looping });
     },
-    
+
     setPlaying: (playing: boolean) => {
         set({ isPlaying: playing });
     },
-    
+
     setPlaybackTime: (time: { current: number; total: number }) => {
         set({ playbackTime: time });
     },
-    
+
     resetEffects: () => {
         set({
             eqSettings: defaultEQSettings,
             timeStretchRatio: 1.0,
             timeStretchEnabled: false,
-            delayMix: 0,
-            reverbMix: 0,
+
             isPreviewingStretch: false,
         });
     },
-    
+
     syncWithEngine: (engine: AudioEngine | null) => {
         if (engine) {
             set({
@@ -237,14 +233,14 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
             });
         }
     },
-    
+
     // EQ actions
     setEQEnabled: (enabled: boolean) => {
         set((state) => ({
             eqSettings: { ...state.eqSettings, enabled },
         }));
     },
-    
+
     setEQGain: (band: 'low' | 'mid' | 'high', gain: number) => {
         set((state) => {
             const newSettings = { ...state.eqSettings };
@@ -254,7 +250,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
             return { eqSettings: newSettings };
         });
     },
-    
+
     setEQFreq: (band: 'low' | 'mid' | 'high', freq: number) => {
         set((state) => {
             const newSettings = { ...state.eqSettings };
@@ -264,21 +260,21 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
             return { eqSettings: newSettings };
         });
     },
-    
+
     setMidQ: (q: number) => {
         set((state) => ({
             eqSettings: { ...state.eqSettings, midQ: q },
         }));
     },
-    
+
     setTimeStretchRatio: (ratio: number) => {
         set({ timeStretchRatio: ratio });
     },
-    
+
     setTimeStretchEnabled: (enabled: boolean) => {
         set({ timeStretchEnabled: enabled });
     },
-    
+
     setPreviewingStretch: (previewing: boolean) => {
         set({ isPreviewingStretch: previewing });
     },

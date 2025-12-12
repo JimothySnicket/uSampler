@@ -29,6 +29,7 @@
   "exclude": [
     "VU Meter Design",
     "node_modules",
-    "dist"
+    "dist",
+    "venv_conversion"
   ]
 }
