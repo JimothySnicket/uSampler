@@ -53,7 +53,8 @@ Capture 5 screenshots (1280x800px recommended):
 5. Sample management sidebar with multiple samples
 
 ### Store Submission
-1. Host privacy policy at public URL (GitHub raw or Pages)
+1. ~~Host privacy policy at public URL~~ — GitHub Pages: `https://jimothysnicket.github.io/uSampler/privacy-policy`
+   - Enable in repo Settings → Pages → Source: `dev/stem-separation` / `docs`
 2. Capture screenshots
 3. Submit to Chrome Web Store Developer Dashboard
 4. Select category: "Productivity" or "Entertainment"
