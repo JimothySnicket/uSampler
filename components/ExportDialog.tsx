@@ -239,6 +239,18 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
                         {mode === 'export-all' ? 'Export All' : 'Save'}
                     </Button>
                 </div>
+
+                <div className="text-center mt-2">
+                    <a
+                        href="https://ko-fi.com/W7W51UG11V"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[7px] hover:opacity-80 transition-opacity"
+                        style={{ color: 'var(--text-faint)' }}
+                    >
+                        Enjoying uSampler? Support on Ko-fi
+                    </a>
+                </div>
             </div>
         </div>
     );

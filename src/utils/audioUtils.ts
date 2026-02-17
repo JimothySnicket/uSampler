@@ -1,3 +1,5 @@
+import { debug, debugWarn, debugError } from './logger';
+
 export type ExportFormat = 'wav' | 'mp3';
 export type MP3Bitrate = 128 | 192 | 256 | 320;
 export type WavBitDepth = 16 | 24 | 32;
@@ -67,7 +69,7 @@ export async function audioBufferToFormat(
                 throw new Error(`MP3 encoding may have failed: file size is suspiciously small (${blob.size} bytes)`);
             }
 
-            console.log(`[audioUtils] MP3 encoding successful: ${(blob.size / 1024).toFixed(2)} KB, bitrate: ${options.bitrate || 128} kbps`);
+            debug(`[audioUtils] MP3 encoding successful: ${(blob.size / 1024).toFixed(2)} KB, bitrate: ${options.bitrate || 128} kbps`);
             return blob;
         } else {
             // Validate buffer for WAV
@@ -94,14 +96,14 @@ export async function audioBufferToFormat(
 
             // Allow 1% tolerance for rounding
             if (sizeDiff > expectedSize * 0.01) {
-                console.warn(`[audioUtils] WAV size mismatch: expected ~${expectedSize} bytes, got ${blob.size} bytes`);
+                debugWarn(`[audioUtils] WAV size mismatch: expected ~${expectedSize} bytes, got ${blob.size} bytes`);
             }
 
-            console.log(`[audioUtils] WAV encoding successful: ${(blob.size / 1024).toFixed(2)} KB`);
+            debug(`[audioUtils] WAV encoding successful: ${(blob.size / 1024).toFixed(2)} KB`);
             return blob;
         }
     } catch (error) {
-        console.error('[audioUtils] Export error:', error);
+        debugError('[audioUtils] Export error:', error);
         if (error instanceof Error) {
             throw new Error(`Export failed: ${error.message}`);
         }

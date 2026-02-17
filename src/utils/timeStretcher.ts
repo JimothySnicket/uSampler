@@ -5,6 +5,8 @@
  * and OfflineAudioContext for high-quality final processing
  */
 
+import { debugError } from './logger';
+
 export interface TimeStretchOptions {
     stretchRatio: number; // > 0, 1.0 = no change, 2.0 = double length
     method?: 'simple'; // Only simple method supported
@@ -81,7 +83,7 @@ export async function timeStretch(
         if (onProgress) onProgress(1.0);
         return result;
     } catch (error) {
-        console.error('Time stretch error:', error);
+        debugError('Time stretch error:', error);
         throw error;
     }
 }

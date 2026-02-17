@@ -1,17 +1,17 @@
 # uSampler Privacy Policy
 
-**Last Updated:** December 2024
+**Last Updated:** February 2026
 
 ## Overview
 
-uSampler ("we", "our", or "us") is committed to protecting your privacy. This Privacy Policy explains how we handle data when you use the uSampler Chrome extension.
+uSampler is committed to protecting your privacy. This Privacy Policy explains how we handle data when you use the uSampler Chrome extension.
 
 ## Data Collection and Storage
 
 ### Audio Data
-- **What we collect:** Audio recordings captured from browser tabs or microphone input
+- **What we collect:** Audio recordings captured from browser tabs
 - **How we use it:** Audio data is processed locally on your device for sampling, editing, and export functionality
-- **Storage:** Audio data is stored locally in your browser using IndexedDB and Chrome's local storage API
+- **Storage:** Audio data is stored locally in your browser using Chrome's local storage API
 - **Transmission:** Audio data is never transmitted to external servers. All processing occurs entirely on your device.
 
 ### Settings and Preferences
@@ -22,9 +22,7 @@ uSampler ("we", "our", or "us") is committed to protecting your privacy. This Pr
 
 ### Extension Usage
 - **What we collect:** No usage analytics or telemetry data is collected
-- **How we use it:** N/A
-- **Storage:** N/A
-- **Transmission:** N/A
+- **Transmission:** No data of any kind is sent to external servers
 
 ## Permissions
 
@@ -32,6 +30,7 @@ uSampler requires the following permissions:
 
 - **tabCapture:** Required to capture audio from browser tabs
 - **activeTab:** Required to interact with the current browser tab
+- **tabs:** Required for tab management during audio capture
 - **scripting:** Required for Manifest V3 extension functionality
 - **windows:** Required to open the extension popup window
 - **downloads:** Required to save exported audio files to your device
@@ -48,6 +47,12 @@ uSampler requires the following permissions:
 
 uSampler does not use any third-party analytics, advertising, or tracking services. All functionality is self-contained within the extension.
 
+## Third-Party Libraries
+
+uSampler uses open-source libraries for audio processing. See THIRD_PARTY_LICENSES.md for full details. Notable:
+- **LAME** (via lamejs) for MP3 encoding — LGPL-3.0 license
+- All libraries run locally; none transmit data externally
+
 ## Data Deletion
 
 You can delete your data at any time by:
@@ -60,11 +65,13 @@ uSampler is not intended for users under the age of 13. We do not knowingly coll
 
 ## Changes to This Policy
 
-We may update this Privacy Policy from time to time. We will notify you of any changes by posting the new Privacy Policy in the extension and updating the "Last Updated" date.
+We may update this Privacy Policy from time to time. We will notify you of any changes by posting the new Privacy Policy and updating the "Last Updated" date.
 
 ## Contact
 
-If you have questions about this Privacy Policy, please contact us through the Chrome Web Store listing.
+If you have questions about this Privacy Policy:
+- Open an issue at https://github.com/JimothySnicket/uSampler/issues
+- Or contact us through the Chrome Web Store listing
 
 ## Compliance
 
@@ -72,10 +79,3 @@ This extension complies with:
 - Chrome Web Store Program Policies
 - General Data Protection Regulation (GDPR)
 - California Consumer Privacy Act (CCPA)
-
-
-
-
-
-
-

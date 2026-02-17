@@ -52,7 +52,6 @@ import {
     Sliders, Lock, MonitorPlay, ChevronDown, RefreshCcw, Volume2, Keyboard, ChevronRight, Sparkles, Loader2, Gauge, Power, Repeat, Save, FolderOpen, VolumeX
 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
-import { Logo } from './components/Logo';
 import { WaveformDisplay } from './components/WaveformDisplay';
 import { UnifiedControl } from './components/UnifiedControl';
 import { PaddleControl } from './components/PaddleControl';
@@ -1893,6 +1892,25 @@ export default function App() {
                     onGainChange={(v) => setGain(Math.round(v * 100))}
                     onThresholdChange={setRecThreshold}
                 />
+            </div>
+
+            {/* Footer */}
+            <div
+                className="shrink-0 flex items-center justify-between px-3 py-0.5"
+                style={{ background: 'var(--deep)', borderTop: '1px solid var(--border-subtle)' }}
+            >
+                <span className="text-[7px]" style={{ color: 'var(--text-faint)' }}>
+                    All processing happens locally. MP3 by <a href="https://lame.sourceforge.net" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>LAME</a> (LGPL-3.0)
+                </span>
+                <a
+                    href="https://ko-fi.com/W7W51UG11V"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[7px] font-medium hover:opacity-80 transition-opacity"
+                    style={{ color: 'var(--text-muted)' }}
+                >
+                    Support on Ko-fi
+                </a>
             </div>
 
             {/* Processing Dialog */}

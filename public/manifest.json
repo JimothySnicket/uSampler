@@ -3,6 +3,7 @@
     "name": "uSampler",
     "version": "1.0.0",
     "description": "High-fidelity sampler and audio recorder.",
+    "homepage_url": "https://github.com/JimothySnicket/uSampler",
     "permissions": [
         "tabCapture",
         "activeTab",
