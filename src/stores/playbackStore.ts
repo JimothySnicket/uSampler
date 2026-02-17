@@ -1,11 +1,9 @@
 import { create } from 'zustand';
-import { Region, Chop } from '../../types';
+import { Region } from '../../types';
 import { AudioEngine } from '../core/AudioEngine';
 
 interface SampleState {
     region: Region;
-    chops: Chop[];
-    activeChopId: string | null;
 }
 
 interface EQSettings {
@@ -17,18 +15,6 @@ interface EQSettings {
     midFreq: number;
     highFreq: number;
     midQ: number;
-}
-
-interface ADSRSettings {
-    mode: 'envelope' | 'gate';
-    attack: number;
-    decay: number;
-    sustain: number;
-    release: number;
-    gateThreshold: number;
-    gateRatio: number;
-    gateAttack: number;
-    gateRelease: number;
 }
 
 interface PlaybackState {
@@ -45,15 +31,11 @@ interface PlaybackState {
     eqSettings: EQSettings;
     timeStretchRatio: number;
     timeStretchEnabled: boolean;
-    adsrSettings: ADSRSettings;
-
     isPreviewingStretch: boolean;
 
     // Actions
     setActiveSample: (sampleId: string) => void;
     setRegion: (sampleId: string, region: Region) => void;
-    setChops: (sampleId: string, chops: Chop[]) => void;
-    setActiveChopId: (sampleId: string, chopId: string | null) => void;
     setLooping: (looping: boolean) => void;
     setPlaying: (playing: boolean) => void;
     setPlaybackTime: (time: { current: number; total: number }) => void;
@@ -62,8 +44,6 @@ interface PlaybackState {
 
     // Getters
     getSampleRegion: (sampleId: string) => Region;
-    getSampleChops: (sampleId: string) => Chop[];
-    getActiveChopId: (sampleId: string) => string | null;
 
     // EQ actions
     setEQEnabled: (enabled: boolean) => void;
@@ -79,8 +59,6 @@ interface PlaybackState {
 
 const defaultSampleState: SampleState = {
     region: { start: 0, end: 1 },
-    chops: [],
-    activeChopId: null,
 };
 
 const defaultEQSettings: EQSettings = {
@@ -94,18 +72,6 @@ const defaultEQSettings: EQSettings = {
     midQ: 1.2,
 };
 
-const defaultADSRSettings: ADSRSettings = {
-    mode: 'envelope',
-    attack: 0.01,
-    decay: 0.1,
-    sustain: 0.7,
-    release: 0.2,
-    gateThreshold: -20,
-    gateRatio: 4,
-    gateAttack: 0.01,
-    gateRelease: 0.1,
-};
-
 export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     // Initial state
     activeSampleId: '',
@@ -116,24 +82,12 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     eqSettings: defaultEQSettings,
     timeStretchRatio: 1.0,
     timeStretchEnabled: false,
-    adsrSettings: defaultADSRSettings,
-
     isPreviewingStretch: false,
 
     // Getters
     getSampleRegion: (sampleId: string) => {
         const state = get().sampleStates[sampleId];
         return state?.region || { start: 0, end: 1 };
-    },
-
-    getSampleChops: (sampleId: string) => {
-        const state = get().sampleStates[sampleId];
-        return state?.chops || [];
-    },
-
-    getActiveChopId: (sampleId: string) => {
-        const state = get().sampleStates[sampleId];
-        return state?.activeChopId || null;
     },
 
     // Actions
@@ -177,28 +131,6 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
         newSampleStates[sampleId] = {
             ...sampleState,
             region,
-        };
-        set({ sampleStates: newSampleStates });
-    },
-
-    setChops: (sampleId: string, chops: Chop[]) => {
-        const currentState = get();
-        const sampleState = currentState.sampleStates[sampleId] || { ...defaultSampleState };
-        const newSampleStates = { ...currentState.sampleStates };
-        newSampleStates[sampleId] = {
-            ...sampleState,
-            chops,
-        };
-        set({ sampleStates: newSampleStates });
-    },
-
-    setActiveChopId: (sampleId: string, chopId: string | null) => {
-        const currentState = get();
-        const sampleState = currentState.sampleStates[sampleId] || { ...defaultSampleState };
-        const newSampleStates = { ...currentState.sampleStates };
-        newSampleStates[sampleId] = {
-            ...sampleState,
-            activeChopId: chopId,
         };
         set({ sampleStates: newSampleStates });
     },

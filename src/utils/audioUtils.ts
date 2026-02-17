@@ -1,8 +1,10 @@
 export type ExportFormat = 'wav' | 'mp3';
 export type MP3Bitrate = 128 | 192 | 256 | 320;
+export type WavBitDepth = 16 | 24 | 32;
 
 export interface ExportOptions {
     bitrate?: MP3Bitrate;
+    bitDepth?: WavBitDepth;
 }
 
 export function formatDuration(seconds: number): string {
@@ -77,17 +79,19 @@ export async function audioBufferToFormat(
                 throw new Error(`Invalid audio buffer: invalid sample rate (${buffer.sampleRate})`);
             }
 
-            const blob = audioBufferToWav(buffer);
+            const depth = options.bitDepth || 16;
+            const blob = audioBufferToWav(buffer, depth);
 
             // Validate WAV blob
             if (!blob || blob.size === 0) {
                 throw new Error('WAV encoding failed: produced empty or invalid blob');
             }
 
-            // Calculate expected WAV size: header (44 bytes) + data (sampleRate * channels * 2 * duration)
-            const expectedSize = 44 + (buffer.length * buffer.numberOfChannels * 2);
+            // Calculate expected WAV size: header + data
+            const bytesPerSample = depth === 32 ? 4 : depth === 24 ? 3 : 2;
+            const expectedSize = 44 + (buffer.length * buffer.numberOfChannels * bytesPerSample);
             const sizeDiff = Math.abs(blob.size - expectedSize);
-            
+
             // Allow 1% tolerance for rounding
             if (sizeDiff > expectedSize * 0.01) {
                 console.warn(`[audioUtils] WAV size mismatch: expected ~${expectedSize} bytes, got ${blob.size} bytes`);
@@ -105,16 +109,19 @@ export async function audioBufferToFormat(
     }
 }
 
-export function audioBufferToWav(buffer: AudioBuffer): Blob {
+export function audioBufferToWav(buffer: AudioBuffer, bitDepth: WavBitDepth = 16): Blob {
     const numOfChan = buffer.numberOfChannels;
-    const length = buffer.length * numOfChan * 2 + 44;
+    const bytesPerSample = bitDepth === 32 ? 4 : bitDepth === 24 ? 3 : 2;
+    const dataLength = buffer.length * numOfChan * bytesPerSample;
+    const headerLength = 44;
+    const length = dataLength + headerLength;
     const out = new ArrayBuffer(length);
     const view = new DataView(out);
-    const channels = [];
-    let i;
-    let sample;
-    let offset = 0;
+    const channels: Float32Array[] = [];
     let pos = 0;
+
+    // Format tag: 1 = PCM integer, 3 = IEEE float
+    const formatTag = bitDepth === 32 ? 3 : 1;
 
     // write WAVE header
     setUint32(0x46464952); // "RIFF"
@@ -123,39 +130,53 @@ export function audioBufferToWav(buffer: AudioBuffer): Blob {
 
     setUint32(0x20746d66); // "fmt " chunk
     setUint32(16); // length = 16
-    setUint16(1); // PCM (uncompressed)
+    setUint16(formatTag);
     setUint16(numOfChan);
     setUint32(buffer.sampleRate);
-    setUint32(buffer.sampleRate * 2 * numOfChan); // avg. bytes/sec
-    setUint16(numOfChan * 2); // block-align
-    setUint16(16); // 16-bit (hardcoded in this example)
+    setUint32(buffer.sampleRate * bytesPerSample * numOfChan); // avg. bytes/sec
+    setUint16(numOfChan * bytesPerSample); // block-align
+    setUint16(bitDepth);
 
     setUint32(0x61746164); // "data" - chunk
-    setUint32(length - pos - 4); // chunk length
+    setUint32(dataLength); // chunk length
 
-    // write interleaved data
-    for (i = 0; i < buffer.numberOfChannels; i++)
+    // Collect channel data
+    for (let i = 0; i < numOfChan; i++)
         channels.push(buffer.getChannelData(i));
 
-    while (pos < buffer.length) {
-        for (i = 0; i < numOfChan; i++) {
-            // interleave channels
-            sample = Math.max(-1, Math.min(1, channels[i][pos])); // clamp
-            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; // scale to 16-bit signed int
-            view.setInt16(44 + offset, sample, true); // write 16-bit sample
-            offset += 2;
+    // Write interleaved samples
+    let offset = headerLength;
+    for (let s = 0; s < buffer.length; s++) {
+        for (let ch = 0; ch < numOfChan; ch++) {
+            const sample = Math.max(-1, Math.min(1, channels[ch][s]));
+
+            if (bitDepth === 16) {
+                const int16 = (sample < 0 ? sample * 32768 : sample * 32767) | 0;
+                view.setInt16(offset, int16, true);
+                offset += 2;
+            } else if (bitDepth === 24) {
+                // 24-bit signed integer: scale to [-8388608, 8388607]
+                const int24 = Math.round(sample < 0 ? sample * 8388608 : sample * 8388607);
+                view.setUint8(offset, int24 & 0xFF);
+                view.setUint8(offset + 1, (int24 >> 8) & 0xFF);
+                view.setUint8(offset + 2, (int24 >> 16) & 0xFF);
+                offset += 3;
+            } else {
+                // 32-bit float: write raw float value
+                view.setFloat32(offset, sample, true);
+                offset += 4;
+            }
         }
-        pos++;
     }
 
     return new Blob([out], { type: 'audio/wav' });
 
-    function setUint16(data: any) {
+    function setUint16(data: number) {
         view.setUint16(pos, data, true);
         pos += 2;
     }
 
-    function setUint32(data: any) {
+    function setUint32(data: number) {
         view.setUint32(pos, data, true);
         pos += 4;
     }

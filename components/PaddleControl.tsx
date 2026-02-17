@@ -63,11 +63,11 @@ export const PaddleControl: React.FC<PaddleControlProps> = ({
 
   const percentage = ((value - min) / (max - min)) * 100;
   
-  const colorClasses = {
-    indigo: 'bg-indigo-500 border-indigo-400',
-    green: 'bg-green-500 border-green-400',
-    yellow: 'bg-yellow-500 border-yellow-400',
-    red: 'bg-red-500 border-red-400'
+  const colorStyles: Record<string, React.CSSProperties> = {
+    indigo: { background: 'var(--accent-indigo)', borderColor: 'var(--accent-indigo)' },
+    green: { background: 'var(--success)', borderColor: 'var(--success)' },
+    yellow: { background: 'var(--warning)', borderColor: 'var(--warning)' },
+    red: { background: 'var(--danger)', borderColor: 'var(--danger)' },
   };
 
   const notchPositions = [0, 25, 50, 75, 100];
@@ -75,55 +75,58 @@ export const PaddleControl: React.FC<PaddleControlProps> = ({
   return (
     <div className="flex flex-col items-center gap-3 select-none">
       <div className="text-center">
-        <div className="text-sm uppercase font-bold text-zinc-400 tracking-wider mb-2">{label}</div>
+        <div className="text-sm uppercase font-bold tracking-wider mb-2" style={{ color: 'var(--text-muted)' }}>{label}</div>
         {description && (
-          <div className="text-xs text-zinc-500 mb-3 max-w-[100px] leading-relaxed">{description}</div>
+          <div className="text-xs mb-3 max-w-[100px] leading-relaxed" style={{ color: 'var(--text-faint)' }}>{description}</div>
         )}
-        <div className={`text-2xl font-mono font-bold ${color === 'indigo' ? 'text-indigo-400' : color === 'green' ? 'text-green-400' : color === 'yellow' ? 'text-yellow-400' : 'text-red-400'}`}>
+        <div className="text-2xl font-mono font-bold" style={colorStyles[color]}>
           {value}{unit}
         </div>
       </div>
-      
-      <div 
-        className="relative w-12 h-32 bg-zinc-900 border border-zinc-800 rounded-md cursor-ns-resize group overflow-hidden"
+
+      <div
+        className="relative w-12 h-32 rounded-md cursor-ns-resize group overflow-hidden"
+        style={{ background: 'var(--overlay)', border: '1px solid var(--overlay-hover)' }}
         onMouseDown={handleMouseDown}
       >
         {/* Notches */}
         {showNotches && (
           <div className="absolute inset-0 flex flex-col justify-between py-1 pointer-events-none">
             {notchPositions.map((pos) => (
-              <div 
+              <div
                 key={pos}
-                className="w-full h-px bg-zinc-800"
-                style={{ marginTop: pos === 0 ? '0' : pos === 100 ? 'auto' : 'auto', marginBottom: pos === 100 ? '0' : 'auto' }}
+                className="w-full h-px"
+                style={{ background: 'var(--overlay-hover)', marginTop: pos === 0 ? '0' : pos === 100 ? 'auto' : 'auto', marginBottom: pos === 100 ? '0' : 'auto' }}
               />
             ))}
           </div>
         )}
-        
+
         {/* Track */}
-        <div className="absolute bottom-0 left-0 right-0 bg-zinc-800/50" style={{ height: `${100 - percentage}%` }} />
-        
+        <div className="absolute bottom-0 left-0 right-0" style={{ height: `${100 - percentage}%`, background: 'color-mix(in srgb, var(--overlay-hover) 50%, transparent)' }} />
+
         {/* Value Fill */}
-        <div 
-          className={`absolute bottom-0 left-0 right-0 ${colorClasses[color]} transition-all duration-75`}
-          style={{ height: `${percentage}%` }}
+        <div
+          className="absolute bottom-0 left-0 right-0 transition-all duration-75"
+          style={{ height: `${percentage}%`, ...colorStyles[color] }}
         />
-        
+
         {/* Paddle Handle */}
-        <div 
-          className={`absolute left-0 right-0 ${colorClasses[color]} border-t-2 transition-all duration-75 shadow-lg`}
-          style={{ 
+        <div
+          className="absolute left-0 right-0 transition-all duration-75 shadow-lg"
+          style={{
             bottom: `${percentage}%`,
             height: '8px',
-            marginBottom: '-4px'
+            marginBottom: '-4px',
+            ...colorStyles[color],
+            borderTop: `2px solid ${colorStyles[color].borderColor}`,
           }}
         />
-        
+
         {/* Value indicator line */}
-        <div 
+        <div
           className="absolute left-0 right-0 border-t border-white/30 pointer-events-none"
-          style={{ 
+          style={{
             bottom: `${percentage}%`,
             marginBottom: '-0.5px'
           }}

@@ -1,5 +1,40 @@
 @import "tailwindcss";
 
+/* ─── Tailwind v4 Theme Extensions ─── */
+@theme {
+  --color-theme-bg: var(--bg);
+  --color-theme-surface: var(--surface);
+  --color-theme-elevated: var(--elevated);
+  --color-theme-input: var(--input-bg);
+  --color-theme-deep: var(--deep);
+  --color-theme-inset: var(--inset);
+  --color-theme-overlay: var(--overlay);
+  --color-theme-overlay-hover: var(--overlay-hover);
+
+  --color-theme-border: var(--border);
+  --color-theme-border-subtle: var(--border-subtle);
+  --color-theme-border-strong: var(--border-strong);
+
+  --color-theme-text: var(--text-primary);
+  --color-theme-text-secondary: var(--text-secondary);
+  --color-theme-text-muted: var(--text-muted);
+  --color-theme-text-faint: var(--text-faint);
+
+  --color-theme-accent: var(--accent);
+  --color-theme-accent-purple: var(--accent-purple);
+  --color-theme-accent-indigo: var(--accent-indigo);
+  --color-theme-accent-indigo-strong: var(--accent-indigo-strong);
+  --color-theme-accent-blue: var(--accent-blue);
+
+  --color-theme-record: var(--record);
+  --color-theme-selected: var(--selected);
+  --color-theme-success: var(--success);
+  --color-theme-success-muted: var(--success-muted);
+  --color-theme-danger: var(--danger);
+  --color-theme-danger-muted: var(--danger-muted);
+  --color-theme-warning: var(--warning);
+}
+
 /* Custom Scrollbar for Webkit */
 ::-webkit-scrollbar {
   width: 8px;
@@ -7,16 +42,88 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: #18181b;
+  background: var(--bg);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: var(--border);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
+  background: var(--elevated);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent-indigo) 30%, transparent);
+}
+
+/* ─── Theme Variables ─── */
+:root {
+  /* Background Scale */
+  --bg: #1e1e24;
+  --surface: #26262c;
+  --elevated: #32323a;
+  --input-bg: #18181e;
+  --deep: #0a0a0a;
+  --inset: #111111;
+  --overlay: #111114;
+  --overlay-hover: #1c1c20;
+
+  /* Border Scale */
+  --border: #3a3a42;
+  --border-subtle: #2e2e36;
+  --border-strong: #44444c;
+
+  /* Text Scale */
+  --text-primary: #FAFAFE;
+  --text-secondary: #D4D4DC;
+  --text-muted: #A8A8B2;
+  --text-faint: #808088;
+
+  /* Accent Colors */
+  --accent: #E07B6A;
+  --accent-purple: #9B82D4;
+  --accent-indigo: #818cf8;
+  --accent-indigo-strong: #6366f1;
+  --accent-blue: #60a5fa;
+
+  /* Semantic / State Colors */
+  --record: #B85858;
+  --selected: #4D4D55;
+  --success: #22c55e;
+  --success-muted: rgba(22, 101, 52, 0.2);
+  --danger: #ef4444;
+  --danger-muted: rgba(153, 27, 27, 0.2);
+  --warning: #fab005;
+
+  /* VU Meter */
+  --vu-green: #6BAA6B;
+  --vu-yellow: #C8B85B;
+  --vu-red: #C46B6B;
+  --vu-green-bright: #22c55e;
+  --vu-yellow-bright: #fab005;
+  --vu-red-bright: #ef4444;
+
+  /* Waveform / Canvas */
+  --waveform-bg: #141418;
+  --waveform-color: #818cf8;
+  --playhead: #ffffff;
+  --region-start: #22c55e;
+  --region-end: #ef4444;
+  --chop-line: #3f3f46;
+
+  /* EQ Band Colors */
+  --eq-low: #f59e0b;
+  --eq-mid: #10b981;
+  --eq-high: #3b82f6;
+
+  /* Knob / Hardware UI */
+  --knob-track: #1a1a1e;
+
+  /* Logo */
+  --logo-bg: #0f1729;
+  --logo-accent: #F5C518;
 }
 
 /* Base Styles */
@@ -29,8 +136,8 @@ html, body {
 }
 
 body {
-  background-color: #09090b;
-  color: white;
+  background-color: var(--bg);
+  color: var(--text-primary);
 }
 
 #root {
@@ -47,4 +154,3 @@ body {
 .scrollbar-hide::-webkit-scrollbar {
   display: none;  /* Chrome, Safari, Opera */
 }
-

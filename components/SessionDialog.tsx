@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Save, FolderOpen, X, Check, Trash2, Clock, FileAudio } from 'lucide-react';
+import { Button } from './Button';
 import { saveSession, loadSession, listSessions, deleteSession } from '../src/utils/storageUtils';
 import { Sample } from '../types';
+import { debugError } from '../src/utils/logger';
 
 interface SessionDialogProps {
     isOpen: boolean;
@@ -44,7 +46,7 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
             const sessions = await listSessions();
             setSavedSessions(sessions);
         } catch (error) {
-            console.error('Failed to load sessions:', error);
+            debugError('Failed to load sessions:', error);
             setMessage({ type: 'error', text: 'Failed to load sessions' });
         } finally {
             setIsLoading(false);
@@ -73,7 +75,7 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
                 setMessage(null);
             }, 1500);
         } catch (error) {
-            console.error('Failed to save session:', error);
+            debugError('Failed to save session:', error);
             setMessage({ type: 'error', text: 'Failed to save session' });
         } finally {
             setIsSaving(false);
@@ -98,7 +100,7 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
                 setMessage(null);
             }, 1500);
         } catch (error) {
-            console.error('Failed to load session:', error);
+            debugError('Failed to load session:', error);
             setMessage({ type: 'error', text: 'Failed to load session' });
         } finally {
             setIsLoadingSession(null);
@@ -117,7 +119,7 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
             setMessage({ type: 'success', text: 'Session deleted' });
             setTimeout(() => setMessage(null), 2000);
         } catch (error) {
-            console.error('Failed to delete session:', error);
+            debugError('Failed to delete session:', error);
             setMessage({ type: 'error', text: 'Failed to delete session' });
         }
     };
@@ -130,23 +132,24 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
     };
 
     return (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <div className="rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" style={{ background: 'var(--overlay)', border: '1px solid var(--overlay-hover)' }}>
                 {/* Header */}
-                <div className="flex items-center justify-between p-4 border-b border-zinc-800">
+                <div className="flex items-center justify-between p-4" style={{ borderBottom: '1px solid var(--overlay-hover)' }}>
                     <div className="flex items-center gap-2">
                         {mode === 'save' ? (
-                            <Save className="w-5 h-5 text-indigo-400" />
+                            <Save className="w-5 h-5" style={{ color: 'var(--accent-indigo)' }} />
                         ) : (
-                            <FolderOpen className="w-5 h-5 text-indigo-400" />
+                            <FolderOpen className="w-5 h-5" style={{ color: 'var(--accent-indigo)' }} />
                         )}
-                        <h2 className="text-lg font-bold text-zinc-200">
+                        <h2 className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>
                             {mode === 'save' ? 'Save Session' : 'Load Session'}
                         </h2>
                     </div>
                     <button
                         onClick={onClose}
-                        className="p-1.5 hover:bg-zinc-800 rounded text-zinc-400 hover:text-zinc-200 transition-colors"
+                        className="p-1.5 rounded transition-opacity hover:opacity-80"
+                        style={{ color: 'var(--text-muted)' }}
                         title="Close"
                     >
                         <X className="w-5 h-5" />
@@ -158,7 +161,7 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
                     {mode === 'save' ? (
                         <>
                             <div className="space-y-2">
-                                <label className="block text-sm font-medium text-zinc-300">
+                                <label className="block text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
                                     Session Name
                                 </label>
                                 <input
@@ -167,10 +170,11 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
                                     onChange={(e) => setSessionName(e.target.value)}
                                     placeholder="My Session"
                                     disabled={isSaving}
-                                    className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:opacity-50"
+                                    className="w-full rounded-md px-3 py-2 text-sm focus:outline-none disabled:opacity-50"
+                                    style={{ background: 'var(--deep)', border: '1px solid var(--overlay-hover)', color: 'var(--text-primary)', outlineColor: 'var(--accent-indigo)' }}
                                     autoFocus
                                 />
-                                <p className="text-xs text-zinc-500">
+                                <p className="text-xs" style={{ color: 'var(--text-faint)' }}>
                                     {samples.length} sample{samples.length !== 1 ? 's' : ''} will be saved
                                 </p>
                             </div>
@@ -179,10 +183,10 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
                         <>
                             {isLoading ? (
                                 <div className="flex items-center justify-center py-8">
-                                    <div className="w-6 h-6 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
+                                    <div className="w-6 h-6 rounded-full animate-spin" style={{ border: '2px solid color-mix(in srgb, var(--accent-indigo) 30%, transparent)', borderTopColor: 'var(--accent-indigo)' }} />
                                 </div>
                             ) : savedSessions.length === 0 ? (
-                                <div className="text-center py-8 text-zinc-500">
+                                <div className="text-center py-8" style={{ color: 'var(--text-faint)' }}>
                                     <FileAudio className="w-12 h-12 mx-auto mb-2 opacity-50" />
                                     <p>No saved sessions</p>
                                 </div>
@@ -192,14 +196,17 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
                                         <div
                                             key={session.id}
                                             onClick={() => handleLoad(session.id)}
-                                            className="p-3 bg-zinc-950 border border-zinc-800 rounded-md hover:border-indigo-500/50 hover:bg-zinc-900 transition-colors cursor-pointer group"
+                                            className="p-3 rounded-md transition-colors cursor-pointer group"
+                                            style={{ background: 'var(--deep)', border: '1px solid var(--overlay-hover)' }}
+                                            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'color-mix(in srgb, var(--accent-indigo) 50%, transparent)'; e.currentTarget.style.background = 'var(--overlay)'; }}
+                                            onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--overlay-hover)'; e.currentTarget.style.background = 'var(--deep)'; }}
                                         >
                                             <div className="flex items-start justify-between">
                                                 <div className="flex-1 min-w-0">
-                                                    <h3 className="text-sm font-medium text-zinc-200 truncate">
+                                                    <h3 className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>
                                                         {session.name}
                                                     </h3>
-                                                    <div className="flex items-center gap-4 mt-1 text-xs text-zinc-500">
+                                                    <div className="flex items-center gap-4 mt-1 text-xs" style={{ color: 'var(--text-faint)' }}>
                                                         <span className="flex items-center gap-1">
                                                             <FileAudio className="w-3 h-3" />
                                                             {session.sampleCount} sample{session.sampleCount !== 1 ? 's' : ''}
@@ -212,12 +219,15 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
                                                 </div>
                                                 <div className="flex items-center gap-2 ml-2">
                                                     {isLoadingSession === session.id ? (
-                                                        <div className="w-4 h-4 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
+                                                        <div className="w-4 h-4 rounded-full animate-spin" style={{ border: '2px solid color-mix(in srgb, var(--accent-indigo) 30%, transparent)', borderTopColor: 'var(--accent-indigo)' }} />
                                                     ) : (
                                                         <>
                                                             <button
                                                                 onClick={(e) => handleDelete(session.id, e)}
-                                                                className="p-1.5 opacity-0 group-hover:opacity-100 hover:bg-red-500/20 hover:text-red-400 rounded transition-all"
+                                                                className="p-1.5 opacity-0 group-hover:opacity-100 rounded transition-all"
+                                                                style={{ color: 'var(--text-muted)' }}
+                                                                onMouseEnter={(e) => { e.currentTarget.style.background = 'color-mix(in srgb, var(--danger) 20%, transparent)'; e.currentTarget.style.color = 'var(--danger)'; }}
+                                                                onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-muted)'; }}
                                                                 title="Delete session"
                                                             >
                                                                 <Trash2 className="w-4 h-4" />
@@ -235,42 +245,32 @@ export const SessionDialog: React.FC<SessionDialogProps> = ({
 
                     {/* Message */}
                     {message && (
-                        <div className={`p-3 rounded-md ${
-                            message.type === 'success' 
-                                ? 'bg-green-500/10 border border-green-500/50 text-green-400' 
-                                : 'bg-red-500/10 border border-red-500/50 text-red-400'
-                        }`}>
+                        <div
+                            className="p-3 rounded-md"
+                            style={message.type === 'success'
+                                ? { background: 'var(--success-muted)', border: '1px solid color-mix(in srgb, var(--success) 50%, transparent)', color: 'var(--success)' }
+                                : { background: 'var(--danger-muted)', border: '1px solid color-mix(in srgb, var(--danger) 50%, transparent)', color: 'var(--danger)' }
+                            }
+                        >
                             <p className="text-sm">{message.text}</p>
                         </div>
                     )}
 
                     {/* Actions */}
                     {mode === 'save' && (
-                        <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
-                            <button
-                                onClick={onClose}
-                                disabled={isSaving}
-                                className="px-4 py-2 text-sm font-medium text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50"
-                            >
+                        <div className="flex items-center justify-end gap-2 pt-2" style={{ borderTop: '1px solid var(--overlay-hover)' }}>
+                            <Button size="lg" variant="ghost" onClick={onClose} disabled={isSaving}>
                                 Cancel
-                            </button>
-                            <button
+                            </Button>
+                            <Button
+                                size="lg"
+                                variant="primary"
+                                icon={isSaving ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Check />}
                                 onClick={handleSave}
                                 disabled={isSaving || !sessionName.trim()}
-                                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                             >
-                                {isSaving ? (
-                                    <>
-                                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                        Saving...
-                                    </>
-                                ) : (
-                                    <>
-                                        <Check className="w-4 h-4" />
-                                        Save Session
-                                    </>
-                                )}
-                            </button>
+                                {isSaving ? 'Saving...' : 'Save Session'}
+                            </Button>
                         </div>
                     )}
                 </div>

@@ -1,10 +1,13 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { AudioEngine, AudioState } from '../core/AudioEngine.js';
+import { debug, debugError } from '../utils/logger';
 
 interface AudioContextType {
     engine: AudioEngine | null;
     state: string;
     isArmed: boolean;
+    statusMessage: string;
+    connectionStatus: 'disconnected' | 'connecting' | 'connected';
     initialize: (streamId: string) => Promise<void>;
     toggleArm: () => void;
     startRecording: () => void;
@@ -12,6 +15,7 @@ interface AudioContextType {
     playSample: (sample: any, loop: boolean) => void;
     stopPlayback: () => void;
     selectSource: () => Promise<boolean>;
+    connectToTab: (tabId: number) => Promise<boolean>;
     setRecordingCallback: (callback: (blob: Blob, audioBuffer: AudioBuffer | null) => void) => void;
 }
 
@@ -39,7 +43,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const setRecordingCallback = (callback: (blob: Blob, audioBuffer: AudioBuffer | null) => void) => {
         if (engineRef.current) {
             engineRef.current.onRecordingStopped = (blob: Blob, audioBuffer: AudioBuffer | null) => {
-                console.log('[AudioContext] Recording stopped callback fired');
+                debug('[AudioContext] Recording stopped callback fired');
                 setState(AudioState.IDLE);
                 engineRef.current?.stopThresholdMonitoring();
                 callback(blob, audioBuffer);
@@ -51,7 +55,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     useEffect(() => {
         const engine = engineRef.current;
         engine.onThresholdExceeded = () => {
-            console.log('[AudioContext] Threshold exceeded');
+            debug('[AudioContext] Threshold exceeded');
             if (engine.state === AudioState.ARMED) {
                 engine.stopThresholdMonitoring();
                 engine.startRecording();
@@ -78,15 +82,24 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return () => cancelAnimationFrame(animId);
     }, [isArmed, state]);
 
+    const [statusMessage, setStatusMessage] = useState<string>('');
+    const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
+
     const initialize = async (streamId: string) => {
         if (engineRef.current) {
             engineRef.current.initContext();
             if (streamId) {
+                setConnectionStatus('connecting');
+                setStatusMessage('Connecting to stream...');
                 const success = await engineRef.current.connectStream(streamId);
                 if (success) {
-                    console.log('[AudioContext] Audio Stream Connected');
+                    debug('[AudioContext] Audio Stream Connected');
+                    setConnectionStatus('connected');
+                    setStatusMessage('Connected');
                 } else {
-                    console.error('[AudioContext] Audio Stream Connection Failed');
+                    debugError('[AudioContext] Audio Stream Connection Failed');
+                    setConnectionStatus('disconnected');
+                    setStatusMessage('Connection Failed');
                 }
             }
         }
@@ -95,9 +108,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const selectSource = async (): Promise<boolean> => {
         if (engineRef.current) {
             try {
+                setConnectionStatus('connecting');
+                setStatusMessage('Selecting source...');
                 const success = await engineRef.current.connectDisplayMedia();
                 if (success) {
-                    console.log('[AudioContext] Source connected, Auto-Arming...');
+                    debug('[AudioContext] Source connected (DisplayMedia), Auto-Arming...');
+                    setConnectionStatus('connected');
+                    setStatusMessage('Source Connected');
                     // Atomic State Transition: Auto-Arm immediately
                     if (state !== AudioState.RECORDING) {
                         setState(AudioState.ARMED);
@@ -106,12 +123,63 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                         engineRef.current.startThresholdMonitoring();
                     }
                     return true;
+                } else {
+                    setConnectionStatus('disconnected');
+                    setStatusMessage('');
                 }
             } catch (err) {
-                console.error('[AudioContext] Error selecting source:', err);
+                debugError('[AudioContext] Error selecting source:', err);
+                setConnectionStatus('disconnected');
+                setStatusMessage('Selection Cancelled');
             }
         }
         return false;
+    };
+
+    const connectToTab = async (tabId: number): Promise<boolean> => {
+        if (!engineRef.current) return false;
+
+        setConnectionStatus('connecting');
+        setStatusMessage('Connecting to Tab...');
+
+        return new Promise((resolve) => {
+            try {
+                // chrome.tabCapture types should now be available
+                chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, async (streamId: string) => {
+                    if (chrome.runtime.lastError || !streamId) {
+                        debugError('[AudioContext] Error getting stream ID:', chrome.runtime.lastError);
+                        setConnectionStatus('disconnected');
+                        setStatusMessage('Connection Failed');
+                        resolve(false);
+                        return;
+                    }
+
+                    const success = await engineRef.current!.connectStream(streamId);
+                    if (success) {
+                        debug('[AudioContext] Connected to Tab Stream!');
+                        setConnectionStatus('connected');
+                        setStatusMessage('Tab Connected');
+                        // Auto-arm on successful silent connection
+                        if (state !== AudioState.RECORDING) {
+                            setState(AudioState.ARMED);
+                            engineRef.current!.state = AudioState.ARMED;
+                            setIsArmed(true);
+                            engineRef.current!.startThresholdMonitoring();
+                        }
+                        resolve(true);
+                    } else {
+                        setConnectionStatus('disconnected');
+                        setStatusMessage('Stream Connection Failed');
+                        resolve(false);
+                    }
+                });
+            } catch (error) {
+                debugError('[AudioContext] Error in connectToTab:', error);
+                setConnectionStatus('disconnected');
+                setStatusMessage('Error Connecting');
+                resolve(false);
+            }
+        });
     };
 
     const toggleArm = useCallback(() => {
@@ -145,14 +213,14 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 // Disarm when recording starts - user can re-arm for next sample if needed
                 setIsArmed(false);
             } else {
-                console.error('[AudioContext] Failed to start recording');
+                debugError('[AudioContext] Failed to start recording');
                 setState(AudioState.IDLE);
             }
         }
     };
 
     const stopRecording = () => {
-        console.log('[AudioContext] stopRecording called');
+        debug('[AudioContext] stopRecording called');
         if (engineRef.current && state === AudioState.RECORDING) {
             engineRef.current.stopRecording();
             // Force state update to ensure UI doesn't get stuck if callback fails
@@ -176,6 +244,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         engine: engineRef.current,
         state,
         isArmed,
+        statusMessage,
+        connectionStatus,
         initialize,
         toggleArm,
         startRecording,
@@ -183,6 +253,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         playSample,
         stopPlayback,
         selectSource,
+        connectToTab,
         setRecordingCallback
     };
 

@@ -19,7 +19,7 @@ export const EQKnob: React.FC<EQKnobProps> = ({
   defaultValue = 0,
   value: controlledValue,
   onChange,
-  color = "#3b82f6", // Default blue
+  color = "var(--eq-high)", // Default blue
   size = 'md',
   formatValue = (val) => `${val > 0 ? '+' : ''}${val.toFixed(1)}dB`
 }) => {
@@ -114,7 +114,7 @@ export const EQKnob: React.FC<EQKnobProps> = ({
             cy={cy}
             r={r}
             fill="transparent"
-            stroke="#27272a" // zinc-800
+            stroke="var(--knob-track)"
             strokeWidth={strokeWidth}
             strokeDasharray={`${arcLength} ${circumference}`}
             strokeLinecap="round"
@@ -138,27 +138,29 @@ export const EQKnob: React.FC<EQKnobProps> = ({
         </svg>
 
         {/* Knob Body/Indicator */}
-        <div 
-          className="absolute top-1/2 left-1/2 rounded-full bg-zinc-800 shadow-[inset_0_1px_1px_rgba(255,255,255,0.05),0_2px_4px_rgba(0,0,0,0.5)] flex items-center justify-center transition-transform duration-75"
-          style={{ 
-            width: w * 0.6, 
+        <div
+          className="absolute top-1/2 left-1/2 rounded-full flex items-center justify-center transition-transform duration-75"
+          style={{
+            width: w * 0.6,
             height: w * 0.6,
-            transform: `translate(-50%, -50%) rotate(${rotation}deg)` 
+            transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
+            background: 'var(--overlay-hover)',
+            boxShadow: 'inset 0 1px 1px rgba(255,255,255,0.05), 0 2px 4px rgba(0,0,0,0.5)'
           }}
         >
-          <div className="w-[2px] h-[30%] bg-zinc-200 rounded-full absolute -top-[10%] left-1/2 -translate-x-1/2 shadow-[0_0_4px_rgba(255,255,255,0.3)]"></div>
+          <div className="w-[2px] h-[30%] rounded-full absolute -top-[10%] left-1/2 -translate-x-1/2" style={{ background: 'var(--text-primary)', boxShadow: '0 0 4px rgba(255,255,255,0.3)' }}></div>
         </div>
       </div>
       
       {size !== 'sm' && (
         <div className="text-center -mt-0.5">
-          <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest group-hover:text-zinc-300 transition-colors leading-none mb-1">{label}</div>
-          <div className="text-[9px] text-zinc-600 font-mono leading-none">{formatValue(value)}</div>
+          <div className="text-[10px] font-bold uppercase tracking-widest transition-colors leading-none mb-1" style={{ color: 'var(--text-faint)' }}>{label}</div>
+          <div className="text-[9px] font-mono leading-none" style={{ color: 'var(--text-faint)' }}>{formatValue(value)}</div>
         </div>
       )}
       {size === 'sm' && (
          <div className="text-center -mt-1">
-          <div className="text-[9px] font-medium text-zinc-600 group-hover:text-zinc-400 transition-colors leading-none">{label}</div>
+          <div className="text-[9px] font-medium transition-colors leading-none" style={{ color: 'var(--text-faint)' }}>{label}</div>
         </div>
       )}
     </div>

@@ -7,7 +7,7 @@ interface KnobProps {
   color?: string;
 }
 
-export const Knob: React.FC<KnobProps> = ({ label, value, onChange, color = 'text-indigo-500' }) => {
+export const Knob: React.FC<KnobProps> = ({ label, value, onChange, color = 'var(--accent-indigo)' }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [startY, setStartY] = useState(0);
   const [startValue, setStartValue] = useState(0);
@@ -60,18 +60,17 @@ export const Knob: React.FC<KnobProps> = ({ label, value, onChange, color = 'tex
             <circle
                 cx="22" cy="22" r={radius}
                 fill="none"
-                stroke="#27272a"
+                stroke="var(--knob-track)"
                 strokeWidth="4"
                 strokeDasharray={circumference}
-                strokeDashoffset={circumference * 0.25} 
+                strokeDashoffset={circumference * 0.25}
                 style={{ transform: `rotate(${rotation}deg)`, transformOrigin: 'center' }}
             />
             {/* Value Track */}
             <circle
                 cx="22" cy="22" r={radius}
                 fill="none"
-                className={`${color}`}
-                stroke="currentColor"
+                stroke={color}
                 strokeWidth="4"
                 strokeDasharray={circumference}
                 strokeDashoffset={strokeDashoffset}
@@ -79,11 +78,11 @@ export const Knob: React.FC<KnobProps> = ({ label, value, onChange, color = 'tex
                 style={{ transform: `rotate(${rotation}deg)`, transformOrigin: 'center' }}
             />
         </svg>
-        <div className="absolute inset-0 flex items-center justify-center text-[10px] font-mono text-zinc-400 pointer-events-none">
+        <div className="absolute inset-0 flex items-center justify-center text-[10px] font-mono pointer-events-none" style={{ color: 'var(--text-muted)' }}>
             {Math.round(value)}
         </div>
       </div>
-      <span className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">{label}</span>
+      <span className="text-[10px] uppercase font-bold tracking-wider" style={{ color: 'var(--text-faint)' }}>{label}</span>
     </div>
   );
 };

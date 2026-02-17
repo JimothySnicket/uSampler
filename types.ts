@@ -1,18 +1,7 @@
-export interface Chop {
-  id: string;
-  start: number; // Normalized 0-1
-  end: number; // Normalized 0-1
-  startFrame: number; // Actual frame number
-  endFrame: number; // Actual frame number
-  buffer?: AudioBuffer; // Cached buffer for preview
-  keyboardNote?: number; // MIDI note for keyboard mapping
-}
-
 export interface Sample {
   id: string;
   name: string;
   duration: string; // Display string like "0:04"
-  bpm: number | string;
   size: string;
   waveform: number[]; // Array of normalized amplitudes 0-1
   tags: string[];
@@ -23,18 +12,6 @@ export interface Sample {
   blob?: Blob;
   trimStart?: number;
   trimEnd?: number;
-
-  // Chopping
-  chops?: Chop[]; // Array of chops for this sample
-
-  // Audio Analysis
-  detectedBPM?: number;
-  detectedKey?: {
-    key: string;
-    mode: 'major' | 'minor';
-    confidence: number;
-  };
-  isAnalyzing?: boolean;
 
   // Processing States
   isTimeStretching?: boolean;
@@ -55,10 +32,6 @@ export interface SourceTab {
 
 export enum TabView {
   MAIN = 'MAIN',
-  CHOP = 'CHOP',
   EQ = 'EQ',
-  NOISE = 'NOISE',
-
-  AI = 'AI',
   TIME_STRETCH = 'TIME_STRETCH'
 }

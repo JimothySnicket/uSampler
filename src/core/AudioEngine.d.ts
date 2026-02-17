@@ -16,14 +16,12 @@ export declare class AudioEngine {
     playbackAnalyserL: AnalyserNode | null;
     playbackAnalyserR: AnalyserNode | null;
     masterGainNode: GainNode | null;
-    mediaStreamDestination: MediaStreamAudioDestinationNode | null;
-    mediaRecorder: MediaRecorder | null;
+    recorderNode: AudioWorkletNode | null;
     state: string;
     activeSource: AudioBufferSourceNode | null;
     playbackStartTime: number;
     currentPlaybackRate: number;
     isLooping: boolean;
-    recordedChunks: BlobPart[];
     recordingBuffer: { min: number; max: number }[];
     onRecordingDataAvailable: ((blob: Blob) => void) | null;
     onRecordingStopped: ((blob: Blob, audioBuffer: AudioBuffer | null) => void) | null;
@@ -55,16 +53,6 @@ export declare class AudioEngine {
     resampleBuffer(buffer: AudioBuffer, targetSampleRate: number): Promise<AudioBuffer>;
     downsample(buffer: AudioBuffer, targetRate: number): Promise<AudioBuffer>;
     bitcrush(buffer: AudioBuffer, bitDepth: number): AudioBuffer;
-    detectTransients(buffer: AudioBuffer, thresholdPercent?: number, options?: {
-        detectedBPM?: number | null;
-        bpmConfidence?: number;
-        bpmWeight?: number;
-        lookbackMs?: number;
-        beatTolerance?: number;
-    }): Promise<number[]>;
-    detectTransientsFallback(buffer: AudioBuffer, thresholdPercent?: number): number[];
-    createChops(buffer: AudioBuffer, chopPoints: number[]): Array<{ buffer: AudioBuffer; startFrame: number; endFrame: number; startTime: number; endTime: number }>;
-    equalDivide(buffer: AudioBuffer, sliceCount: number): Array<{ buffer: AudioBuffer; startFrame: number; endFrame: number; startTime: number; endTime: number }>;
     applyEffectsAndResample(buffer: AudioBuffer, targetSampleRate?: number | null): Promise<AudioBuffer>;
 
     setEQ(params: {
@@ -79,11 +67,5 @@ export declare class AudioEngine {
     }): void;
     getSampleRate(): number;
     bufferToBlob(buffer: AudioBuffer): Blob;
-    detectBPM(buffer: AudioBuffer): Promise<{ bpm: number; threshold: number } | null>;
-    detectKey(buffer: AudioBuffer): Promise<{ key: string; mode: 'major' | 'minor'; confidence: number; alternativeKeys?: Array<{ key: string; mode: 'major' | 'minor'; confidence: number }> } | null>;
-    analyzeAudio(buffer: AudioBuffer): Promise<{ key: { key: string; mode: string; confidence: number } | null; bpm: { bpm: number; threshold: number } | null }>;
     timeStretch(buffer: AudioBuffer, stretchRatio: number, onProgress?: ((progress: number) => void) | null): Promise<AudioBuffer>;
-    timeStretchWithPitch(buffer: AudioBuffer, stretchRatio: number, pitchShiftSemitones: number): Promise<AudioBuffer>;
-    reduceNoise(buffer: AudioBuffer, options?: { method?: 'rnnoise' | 'spectral'; aggressiveness?: number }): Promise<AudioBuffer>;
-    reduceNoiseWithProgress(buffer: AudioBuffer, options?: { method?: 'rnnoise' | 'spectral'; aggressiveness?: number }, onProgress?: ((progress: number) => void) | null): Promise<AudioBuffer>;
 }

@@ -65,21 +65,21 @@ const VUMeter: React.FC<VUMeterProps> = ({ level, peakLevel, channel, className,
             const percent = i / (segmentCount - 1);
             const segDb = minDb + (percent * range);
 
-            let colorClass = "bg-[#22c55e]"; // Standard Green
-            let glowClass = "shadow-[0_0_4px_#22c55e]";
+            let color = 'var(--vu-green-bright)';
+            let glow = '0 0 4px var(--vu-green-bright)';
 
             if (segDb >= 0) {
-                colorClass = "bg-[#ef4444]"; // Red
-                glowClass = "shadow-[0_0_8px_#ef4444]";
+                color = 'var(--vu-red-bright)';
+                glow = '0 0 8px var(--vu-red-bright)';
             } else if (segDb >= -6) {
-                colorClass = "bg-[#fab005]"; // Yellow/Amber
-                glowClass = "shadow-[0_0_6px_#fab005]";
+                color = 'var(--vu-yellow-bright)';
+                glow = '0 0 6px var(--vu-yellow-bright)';
             }
 
             return {
                 db: segDb,
-                colorClass,
-                glowClass
+                color,
+                glow
             };
         });
     }, []);
@@ -90,19 +90,19 @@ const VUMeter: React.FC<VUMeterProps> = ({ level, peakLevel, channel, className,
         <div className={cn("flex flex-col items-center gap-2 w-full h-full", className)}>
 
             {/* Meter Housing - Dark Industrial */}
-            <div className="meter-housing relative w-full flex-1 bg-zinc-900 rounded border border-zinc-700 shadow-[inset_0_2px_4px_rgba(0,0,0,0.5)] p-[2px] flex flex-row">
+            <div className="meter-housing relative w-full flex-1 rounded shadow-[inset_0_2px_4px_rgba(0,0,0,0.5)] p-[2px] flex flex-row" style={{ background: 'var(--overlay)', border: '1px solid var(--border-strong)' }}>
 
                 {/* Scale Markers (Left) */}
-                <div className="flex flex-col justify-between py-1 pr-1 text-[9px] font-bold text-zinc-500 font-mono text-right w-[16px] select-none leading-none z-10">
-                    <span className="text-red-500">+6</span>
-                    <span className="text-yellow-500">0</span>
+                <div className="flex flex-col justify-between py-1 pr-1 text-[9px] font-bold font-mono text-right w-[16px] select-none leading-none z-10" style={{ color: 'var(--text-faint)' }}>
+                    <span style={{ color: 'var(--danger)' }}>+6</span>
+                    <span style={{ color: 'var(--warning)' }}>0</span>
                     <span>-6</span>
                     <span>-12</span>
                     <span>-24</span>
                 </div>
 
                 {/* LED Column */}
-                <div className="relative flex-1 bg-black rounded-[1px] overflow-hidden flex flex-col-reverse gap-[1px] px-[1px] py-[1px]">
+                <div className="relative flex-1 rounded-[1px] overflow-hidden flex flex-col-reverse gap-[1px] px-[1px] py-[1px]" style={{ background: 'var(--deep)' }}>
 
                     {/* Glass Reflection Overlay */}
                     <div className="absolute inset-0 bg-gradient-to-r from-white/5 to-transparent pointer-events-none z-20"></div>
@@ -110,16 +110,16 @@ const VUMeter: React.FC<VUMeterProps> = ({ level, peakLevel, channel, className,
                     {/* Peak Hold Line */}
                     {peakDbValue !== -Infinity && peakDbValue > dbValue && (
                         <div
-                            className="absolute w-full h-[2px] bg-yellow-400 z-30 shadow-[0_0_4px_#facc15] transition-all duration-300 ease-out"
-                            style={{ bottom: `${Math.min(100, Math.max(0, ((peakDbValue + 3 - (-30)) / (6 - (-30))) * 100))}%` }}
+                            className="absolute w-full h-[2px] z-30 transition-all duration-300 ease-out"
+                            style={{ bottom: `${Math.min(100, Math.max(0, ((peakDbValue + 3 - (-30)) / (6 - (-30))) * 100))}%`, background: 'var(--warning)', boxShadow: '0 0 4px var(--warning)' }}
                         />
                     )}
 
                     {/* Threshold Line - Only show on left meter when armed */}
                     {showThreshold && thresholdPositionPercent !== null && (
                         <div
-                            className="absolute w-full h-[2px] bg-yellow-500/90 z-35 shadow-[0_0_6px_rgba(234,179,8,0.8)] transition-all duration-150 ease-out border-t border-yellow-400/50"
-                            style={{ bottom: `${thresholdPositionPercent}%` }}
+                            className="absolute w-full h-[2px] z-35 transition-all duration-150 ease-out"
+                            style={{ bottom: `${thresholdPositionPercent}%`, background: 'color-mix(in srgb, var(--warning) 90%, transparent)', boxShadow: '0 0 6px color-mix(in srgb, var(--warning) 80%, transparent)', borderTop: '1px solid color-mix(in srgb, var(--warning) 50%, transparent)' }}
                         />
                     )}
 
@@ -129,7 +129,11 @@ const VUMeter: React.FC<VUMeterProps> = ({ level, peakLevel, channel, className,
                         return (
                             <div
                                 key={i}
-                                className={`w-full flex-1 rounded-[0.5px] transition-opacity duration-[15ms] ${isActive ? `${seg.colorClass} ${seg.glowClass} opacity-100` : 'bg-zinc-800 opacity-20'}`}
+                                className="w-full flex-1 rounded-[0.5px] transition-opacity duration-[15ms]"
+                                style={isActive
+                                    ? { background: seg.color, boxShadow: seg.glow, opacity: 1 }
+                                    : { background: 'var(--overlay-hover)', opacity: 0.2 }
+                                }
                             />
                         );
                     })}
@@ -139,13 +143,15 @@ const VUMeter: React.FC<VUMeterProps> = ({ level, peakLevel, channel, className,
             {/* Digital Readout - Large, Clickable */}
             <div
                 onClick={onResetPeak}
-                className="w-full bg-[#111] border border-zinc-700 rounded p-1 cursor-pointer hover:bg-zinc-800 hover:border-zinc-500 transition-all group active:scale-95"
+                className="w-full rounded p-1 cursor-pointer transition-all group active:scale-95 hover:opacity-80"
+                style={{ background: 'var(--inset)', border: '1px solid var(--border-strong)' }}
                 title="Click to Reset Peak"
             >
-                <div className={`text-center font-mono font-bold text-lg leading-none tracking-tighter ${peakDbValue >= 0 ? 'text-red-500 animate-pulse' : 'text-[#4ade80]'}`}>
+                <div className={`text-center font-mono font-bold text-lg leading-none tracking-tighter ${peakDbValue >= 0 ? 'animate-pulse' : ''}`}
+                    style={{ color: peakDbValue >= 0 ? 'var(--danger)' : 'var(--success)' }}>
                     {peakDisplayValue}
                 </div>
-                <div className="text-[9px] text-zinc-500 text-center font-bold uppercase tracking-widest mt-0.5 group-hover:text-zinc-400">
+                <div className="text-[9px] text-center font-bold uppercase tracking-widest mt-0.5" style={{ color: 'var(--text-faint)' }}>
                     {channel}
                 </div>
             </div>
@@ -339,18 +345,18 @@ const ThresholdControl: React.FC<ThresholdControlProps> = ({ threshold, onChange
             >
                 {/* Connecting line to meter */}
                 <div
-                    className="absolute right-0 top-1/2 w-[10px] h-[1px] bg-yellow-500/90"
-                    style={{ transform: 'translateY(-50%)' }}
+                    className="absolute right-0 top-1/2 w-[10px] h-[1px]"
+                    style={{ transform: 'translateY(-50%)', background: 'color-mix(in srgb, var(--warning) 90%, transparent)' }}
                 />
 
                 {/* Small chevron indicator */}
                 <div className="relative w-3 h-3 flex items-center justify-center">
                     {/* Background for visibility */}
-                    <div className="absolute inset-0 bg-black/90 rounded-sm" />
-                    <div className="absolute inset-0 bg-yellow-500/30 rounded-sm" />
+                    <div className="absolute inset-0 rounded-sm" style={{ background: 'rgba(0,0,0,0.9)' }} />
+                    <div className="absolute inset-0 rounded-sm" style={{ background: 'color-mix(in srgb, var(--warning) 30%, transparent)' }} />
 
                     {/* Chevron pointing right toward meter */}
-                    <div className="relative text-yellow-400 text-[10px] font-black drop-shadow-[0_0_4px_rgba(234,179,8,1)] font-mono leading-none">
+                    <div className="relative text-[10px] font-black font-mono leading-none" style={{ color: 'var(--warning)', filter: 'drop-shadow(0 0 4px var(--warning))' }}>
                         &gt;
                     </div>
                 </div>
@@ -369,15 +375,16 @@ interface VolumePaddleProps {
 }
 
 const VolumePaddle: React.FC<VolumePaddleProps> = ({ volume, onChange, className, label = "Main", color = 'indigo' }) => {
-    const colorClasses = color === 'orange'
-        ? { track: 'bg-orange-500/20', fill: 'from-orange-600 to-orange-400', handle: 'bg-orange-500 border-orange-400', text: 'text-orange-400' }
-        : { track: 'bg-indigo-500/20', fill: 'from-indigo-600 to-indigo-400', handle: 'bg-indigo-500 border-indigo-400', text: 'text-indigo-400' };
+    const colorStyles = color === 'orange'
+        ? { text: 'var(--accent)' }
+        : { text: 'var(--accent-indigo)' };
 
     return (
         <div className={cn("flex flex-col items-stretch w-full h-full", className)}>
             {/* Functional Control Container - Fixed structure, overlays positioned absolutely */}
             <div
-                className="relative bg-[#111] w-full rounded-md border border-[#222] shadow-[inset_0_2px_10px_rgba(0,0,0,1)] flex justify-center touch-none select-none flex-1 min-h-0"
+                className="relative w-full rounded-md shadow-[inset_0_2px_10px_rgba(0,0,0,1)] flex justify-center touch-none select-none flex-1 min-h-0"
+                style={{ background: 'var(--inset)', border: '1px solid var(--overlay)' }}
             >
                 {/* Track Line */}
                 <div className="absolute top-2 bottom-2 w-[10%] min-w-[4px] bg-black rounded-full shadow-[inset_0_0_5px_rgba(0,0,0,1)] z-0"></div>
@@ -441,7 +448,8 @@ const VolumePaddle: React.FC<VolumePaddleProps> = ({ volume, onChange, className
                 </div>
             </div>
 
-            <div className={cn("text-[8px] sm:text-[9px] text-neutral-500 font-bold tracking-widest uppercase mt-2 bg-black/40 px-2 py-1 rounded border border-white/5 whitespace-nowrap select-none", colorClasses.text)}>
+            <div className="text-[8px] sm:text-[9px] font-bold tracking-widest uppercase mt-2 bg-black/40 px-2 py-1 rounded border border-white/5 whitespace-nowrap select-none"
+                style={{ color: colorStyles.text }}>
                 {label}
             </div>
         </div>
@@ -576,7 +584,7 @@ export const UnifiedControl: React.FC<UnifiedControlProps> = ({
     };
 
     return (
-        <div className="flex flex-col w-full h-full bg-zinc-950 p-2 gap-2 select-none overflow-hidden">
+        <div className="flex flex-col w-full h-full p-2 gap-2 select-none overflow-hidden" style={{ background: 'var(--deep)' }}>
             {/* Main Meter Section - Full height layout with padding */}
             {/* Main Meter Section - Grid Layout for stability */}
             <div className="grid grid-cols-[1fr_1fr_40px] gap-2 flex-1 min-h-0 w-full max-w-[400px] mx-auto px-2 overflow-visible">
@@ -616,7 +624,7 @@ export const UnifiedControl: React.FC<UnifiedControlProps> = ({
 
                 {/* Output Volume Paddle */}
                 <div className="flex flex-col items-center gap-1 h-full min-w-0">
-                    <div className="text-[7px] text-indigo-500 uppercase font-bold tracking-tight h-[16px] flex items-center shrink-0 leading-tight text-center">
+                    <div className="text-[7px] uppercase font-bold tracking-tight h-[16px] flex items-center shrink-0 leading-tight text-center" style={{ color: 'var(--accent-indigo)' }}>
                         {isPlaying ? 'GAIN' : 'OUT'}
                     </div>
                     <div className="flex-1 w-full min-h-0">
@@ -628,7 +636,7 @@ export const UnifiedControl: React.FC<UnifiedControlProps> = ({
                             className="w-full h-full"
                         />
                     </div>
-                    <div className="text-[8px] font-mono font-bold text-indigo-400 h-[16px] flex items-center shrink-0 leading-tight">
+                    <div className="text-[8px] font-mono font-bold h-[16px] flex items-center shrink-0 leading-tight" style={{ color: 'var(--accent-indigo)' }}>
                         {Math.round(localGain * 100)}%
                     </div>
                 </div>

@@ -3,7 +3,7 @@
  * Handles serialization and deserialization of AudioBuffers
  */
 
-import { Sample, Chop } from '../../types';
+import { Sample } from '../../types';
 
 export interface StoredSample {
     id: string;
@@ -14,14 +14,6 @@ export interface StoredSample {
     metadata: {
         name: string;
         duration: string;
-        bpm: number | string;
-        chops?: Chop[];
-        detectedKey?: {
-            key: string;
-            mode: 'major' | 'minor';
-            confidence: number;
-        };
-        detectedBPM?: number;
         waveform?: number[];
         tags?: string[];
         trimStart?: number;
@@ -41,6 +33,7 @@ const DB_NAME = 'uSamplerDB';
 const DB_VERSION = 1;
 const STORE_SESSIONS = 'sessions';
 const STORE_SAMPLES = 'samples';
+const AUTOSAVE_ID = '__autosave__';
 
 let db: IDBDatabase | null = null;
 
@@ -158,10 +151,6 @@ export async function serializeSample(sample: Sample): Promise<StoredSample> {
         metadata: {
             name: sample.name,
             duration: sample.duration,
-            bpm: sample.bpm,
-            chops: sample.chops,
-            detectedKey: sample.detectedKey,
-            detectedBPM: sample.detectedBPM,
             waveform: sample.waveform,
             tags: sample.tags,
             trimStart: sample.trimStart,
@@ -183,7 +172,6 @@ export async function deserializeSample(
         id: stored.id,
         name: stored.metadata.name,
         duration: stored.metadata.duration,
-        bpm: stored.metadata.bpm,
         size: `${(stored.audioData.byteLength / 1024 / 1024).toFixed(2)} MB`,
         waveform: stored.metadata.waveform || [],
         tags: stored.metadata.tags || [],
@@ -191,9 +179,6 @@ export async function deserializeSample(
         blob: undefined, // Will be regenerated if needed
         trimStart: stored.metadata.trimStart,
         trimEnd: stored.metadata.trimEnd,
-        chops: stored.metadata.chops,
-        detectedKey: stored.metadata.detectedKey,
-        detectedBPM: stored.metadata.detectedBPM
     };
 }
 
@@ -309,15 +294,93 @@ export async function listSessions(): Promise<Array<{ id: string; name: string; 
  */
 export async function deleteSession(sessionId: string): Promise<void> {
     const database = await initDB();
-    
+
     return new Promise((resolve, reject) => {
         const transaction = database.transaction([STORE_SESSIONS], 'readwrite');
         const store = transaction.objectStore(STORE_SESSIONS);
         const request = store.delete(sessionId);
-        
+
         request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);
     });
+}
+
+/**
+ * Auto-save current samples to IndexedDB (upserts a fixed autosave record)
+ */
+export async function saveAutosession(samples: Sample[]): Promise<void> {
+    const database = await initDB();
+
+    // If no samples, delete the autosave record
+    if (samples.length === 0) {
+        return new Promise((resolve) => {
+            const transaction = database.transaction([STORE_SESSIONS], 'readwrite');
+            const store = transaction.objectStore(STORE_SESSIONS);
+            store.delete(AUTOSAVE_ID);
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => resolve(); // Don't fail on cleanup
+        });
+    }
+
+    const storedSamples: StoredSample[] = [];
+    for (const sample of samples) {
+        if (sample.buffer) {
+            try {
+                storedSamples.push(await serializeSample(sample));
+            } catch { /* skip samples that fail to serialize */ }
+        }
+    }
+
+    const session: SavedSession = {
+        id: AUTOSAVE_ID,
+        name: '__autosave__',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        samples: storedSamples,
+    };
+
+    return new Promise((resolve, reject) => {
+        const transaction = database.transaction([STORE_SESSIONS], 'readwrite');
+        const store = transaction.objectStore(STORE_SESSIONS);
+        const request = store.put(session); // put = upsert
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Load the autosave session. Returns null if none exists.
+ */
+export async function loadAutosession(audioContext: AudioContext): Promise<Sample[] | null> {
+    try {
+        const database = await initDB();
+
+        return new Promise((resolve) => {
+            const transaction = database.transaction([STORE_SESSIONS], 'readonly');
+            const store = transaction.objectStore(STORE_SESSIONS);
+            const request = store.get(AUTOSAVE_ID);
+
+            request.onsuccess = async () => {
+                const session: SavedSession | undefined = request.result;
+                if (!session || session.samples.length === 0) {
+                    resolve(null);
+                    return;
+                }
+
+                const samples: Sample[] = [];
+                for (const stored of session.samples) {
+                    try {
+                        samples.push(await deserializeSample(stored, audioContext));
+                    } catch { /* skip failed samples */ }
+                }
+                resolve(samples.length > 0 ? samples : null);
+            };
+
+            request.onerror = () => resolve(null);
+        });
+    } catch {
+        return null;
+    }
 }
 
 

@@ -85,24 +85,3 @@ export async function timeStretch(
         throw error;
     }
 }
-
-/**
- * Time stretch with pitch shift
- * Combines time stretching with pitch shifting
- */
-export async function timeStretchWithPitch(
-    buffer: AudioBuffer,
-    stretchRatio: number,
-    pitchShiftSemitones: number
-): Promise<AudioBuffer> {
-    // First time stretch
-    const timeStretched = await timeStretch(buffer, {
-        stretchRatio,
-        method: 'simple'
-    });
-    
-    // Then pitch shift (simplified - would need proper pitch shifting algorithm)
-    // For now, just return time-stretched result
-    // Full implementation would use phase vocoder with frequency scaling
-    return timeStretched;
-}

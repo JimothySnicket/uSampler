@@ -8,23 +8,19 @@ export class AudioEngine {
     constructor() {
         this.context = null;
 
-        // Input Routing (Source -> Analyser -> InputSplitter -> Analysers -> MediaStreamDestination)
+        // Input Routing (Source -> Analyser -> InputSplitter -> Analysers -> RecorderNode)
         this.sourceNode = null;
         this.analyserNode = null; // Main analyser (mono/mix) - kept for visualizer
         this.inputSplitter = null;
         this.inputAnalyserL = null; // Stereo Input L
         this.inputAnalyserR = null; // Stereo Input R
-        this.mediaStreamDestination = null;
+        this.recorderNode = null; // AudioWorklet for lossless PCM capture
 
         // Output Routing (Source -> Effects -> Gain -> Use Playback Analysers -> Destination)
         this.masterGainNode = null;
         this.playbackSplitter = null;
         this.playbackAnalyserL = null; // Stereo Output L
         this.playbackAnalyserR = null; // Stereo Output R
-        // Note: playbackAnalyserNode removed as we now use splitters, but we might keep one for mix visualization if needed?
-        // Let's use the L/R ones for levels.
-
-        this.mediaRecorder = null;
 
         this.state = AudioState.IDLE;
         this.activeSource = null;
@@ -32,7 +28,6 @@ export class AudioEngine {
         this.currentPlaybackRate = 1.0;
         this.isLooping = false;
 
-        this.recordedChunks = [];
         this.recordingBuffer = []; // {min, max} pairs for visualization
 
         this.onRecordingDataAvailable = null; // (blob) => void
@@ -92,8 +87,6 @@ export class AudioEngine {
         this.inputAnalyserL.connect(this.keepAliveGain);
         this.inputAnalyserR.connect(this.keepAliveGain);
 
-        this.mediaStreamDestination = this.context.createMediaStreamDestination();
-
         // --- Output Chain Setup ---
         this.masterGainNode = this.context.createGain();
         this.masterGainNode.gain.value = this.outputVolume;
@@ -112,8 +105,6 @@ export class AudioEngine {
         this.playbackSplitter.connect(this.playbackAnalyserL, 0);
         this.playbackSplitter.connect(this.playbackAnalyserR, 1);
 
-        this.setupMediaRecorder();
-
         // Initialize AudioWorklet modules
         await this.initModules();
 
@@ -123,13 +114,15 @@ export class AudioEngine {
 
     async initModules() {
         // Load AudioWorklet modules with timeout to prevent hanging the entire app
-        const loadModule = async () => {
+        const loadModules = async () => {
             try {
-                // Note: In a Vite/Webpack env, we might need to resolve this URL properly.
-                await this.context.audioWorklet.addModule('processors/NoiseGateProcessor.js');
+                await Promise.all([
+                    this.context.audioWorklet.addModule('processors/NoiseGateProcessor.js'),
+                    this.context.audioWorklet.addModule('processors/RecorderProcessor.js'),
+                ]);
                 return true;
             } catch (error) {
-                console.error('Error adding audio worklet module:', error);
+                console.error('Error adding audio worklet modules:', error);
                 return false;
             }
         };
@@ -137,9 +130,14 @@ export class AudioEngine {
         const timeout = new Promise(resolve => setTimeout(() => {
             console.warn('AudioWorklet module load timed out');
             resolve(false);
-        }, 1000));
+        }, 2000));
 
-        await Promise.race([loadModule(), timeout]);
+        const loaded = await Promise.race([loadModules(), timeout]);
+
+        // Set up PCM recorder worklet (replaces MediaRecorder for lossless capture)
+        if (loaded) {
+            this.setupPCMRecorder();
+        }
     }
 
     getSampleRate() {
@@ -148,6 +146,12 @@ export class AudioEngine {
 
     async connectStream(streamId) {
         if (!this.context) await this.initContext();
+
+        if (this.sourceNode) {
+            console.log("Audio source already connected, disconnecting previous...");
+            this.sourceNode.disconnect();
+            this.sourceNode = null;
+        }
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
@@ -164,6 +168,17 @@ export class AudioEngine {
             }
 
             this.setupSource(stream);
+
+            // Handle stream ending (e.g. tab closed)
+            stream.getAudioTracks()[0].addEventListener('ended', () => {
+                console.log("Tab media stream ended");
+                if (this.sourceNode) {
+                    this.sourceNode.disconnect();
+                    this.sourceNode = null;
+                }
+            });
+
+            console.log("Connected Tab Stream");
             return true;
         } catch (err) {
             console.error('Error connecting stream:', err);
@@ -224,56 +239,114 @@ export class AudioEngine {
     setupSource(stream) {
         this.sourceNode = this.context.createMediaStreamSource(stream);
 
-        // Connection 1: Source -> Main Visualizer Analyser -> Media Destination (Recording)
+        // Connection 1: Source -> Main Visualizer Analyser (-> RecorderNode via setupPCMRecorder)
         this.sourceNode.connect(this.analyserNode);
-        // Note: We don't connect analyserNode to mediaStreamDestination directly anymore if we want stereo recording?
-        // Actually MediaStreamDestination accepts multiple inputs.
-        // Let's keep source -> analyser -> destination flow but hook in splitting
-
-        this.analyserNode.connect(this.mediaStreamDestination);
 
         // Connection 2: Source -> Input Splitter -> Stereo Levels
         this.sourceNode.connect(this.inputSplitter);
     }
 
-    setupMediaRecorder() {
-        this.mediaRecorder = new MediaRecorder(this.mediaStreamDestination.stream, {
-            mimeType: 'audio/webm;codecs=opus'
-        });
+    setupPCMRecorder() {
+        this.recorderNode = new AudioWorkletNode(this.context, 'recorder-processor');
 
-        this.mediaRecorder.ondataavailable = (e) => {
-            if (e.data.size > 0) this.recordedChunks.push(e.data);
-        };
+        // Connect into the recording chain: analyserNode → recorderNode → keepAliveGain
+        // keepAliveGain (gain=0) routes to destination, keeping the processor alive
+        this.analyserNode.connect(this.recorderNode);
+        this.recorderNode.connect(this.keepAliveGain);
 
-        this.mediaRecorder.onstop = async () => {
-            console.log('[AudioEngine] MediaRecorder stopped, chunks:', this.recordedChunks.length);
-            const blob = new Blob(this.recordedChunks, { type: 'audio/webm' });
-            console.log('[AudioEngine] Blob created, size:', blob.size);
-            this.recordedChunks = [];
+        // Handle completed recording data from the worklet
+        this.recorderNode.port.onmessage = (e) => {
+            if (e.data.type === 'recordingComplete') {
+                const { channels } = e.data;
 
-            if (this.onRecordingStopped) {
-                try {
-                    const arrayBuffer = await blob.arrayBuffer();
-                    console.log('[AudioEngine] Decoding audio buffer...');
-                    const audioBuffer = await this.context.decodeAudioData(arrayBuffer);
-                    console.log('[AudioEngine] Audio buffer decoded, duration:', audioBuffer.duration);
-                    this.onRecordingStopped(blob, audioBuffer);
-                } catch (err) {
-                    console.error("[AudioEngine] Error decoding recorded audio:", err);
-                    this.onRecordingStopped(blob, null);
+                if (!channels || channels.length === 0 || channels[0].length === 0) {
+                    console.warn('[AudioEngine] Recording produced no audio data');
+                    if (this.onRecordingStopped) {
+                        this.onRecordingStopped(new Blob([], { type: 'audio/wav' }), null);
+                    }
+                    return;
                 }
-            } else {
-                console.warn('[AudioEngine] No onRecordingStopped callback set!');
+
+                const numChannels = channels.length;
+                const length = channels[0].length;
+                const sampleRate = this.context.sampleRate;
+
+                console.log(`[AudioEngine] PCM recording complete: ${numChannels}ch, ${length} samples, ${sampleRate}Hz, ${(length / sampleRate).toFixed(2)}s`);
+
+                // Create AudioBuffer directly from raw PCM — no decoding needed, lossless
+                const audioBuffer = this.context.createBuffer(numChannels, length, sampleRate);
+                for (let ch = 0; ch < numChannels; ch++) {
+                    audioBuffer.copyToChannel(channels[ch], ch);
+                }
+
+                // Create WAV blob for storage/session persistence
+                const blob = this._rawToWavBlob(channels, sampleRate);
+                console.log(`[AudioEngine] WAV blob created: ${(blob.size / 1024).toFixed(1)} KB`);
+
+                if (this.onRecordingStopped) {
+                    this.onRecordingStopped(blob, audioBuffer);
+                }
             }
         };
     }
 
+    /**
+     * Convert raw Float32 channel arrays to a 16-bit PCM WAV Blob
+     * @param {Float32Array[]} channels - Array of per-channel sample data
+     * @param {number} sampleRate - Sample rate in Hz
+     * @returns {Blob} WAV blob
+     */
+    _rawToWavBlob(channels, sampleRate) {
+        const numChannels = channels.length;
+        const length = channels[0].length;
+        const bytesPerSample = 2;
+        const dataLength = length * numChannels * bytesPerSample;
+        const bufferSize = 44 + dataLength;
+        const buffer = new ArrayBuffer(bufferSize);
+        const view = new DataView(buffer);
+        let pos = 0;
+
+        const setUint16 = (data) => { view.setUint16(pos, data, true); pos += 2; };
+        const setUint32 = (data) => { view.setUint32(pos, data, true); pos += 4; };
+
+        // RIFF header
+        setUint32(0x46464952); // "RIFF"
+        setUint32(bufferSize - 8); // file length - 8
+        setUint32(0x45564157); // "WAVE"
+
+        // fmt chunk
+        setUint32(0x20746d66); // "fmt "
+        setUint32(16); // chunk length
+        setUint16(1); // PCM format
+        setUint16(numChannels);
+        setUint32(sampleRate);
+        setUint32(sampleRate * bytesPerSample * numChannels); // byte rate
+        setUint16(numChannels * bytesPerSample); // block align
+        setUint16(16); // bits per sample
+
+        // data chunk
+        setUint32(0x61746164); // "data"
+        setUint32(dataLength);
+
+        // Write interleaved 16-bit PCM samples
+        let offset = 44;
+        for (let i = 0; i < length; i++) {
+            for (let ch = 0; ch < numChannels; ch++) {
+                const s = Math.max(-1, Math.min(1, channels[ch][i]));
+                const int16 = (s < 0 ? s * 32768 : s * 32767) | 0;
+                view.setInt16(offset, int16, true);
+                offset += 2;
+            }
+        }
+
+        return new Blob([buffer], { type: 'audio/wav' });
+    }
+
     startRecording() {
-        if (this.mediaRecorder && this.mediaRecorder.state === 'inactive') {
+        if (this.recorderNode) {
             this.recordingBuffer = [];
-            this.recordedChunks = [];
             try {
-                this.mediaRecorder.start(100);
+                this.recorderNode.port.postMessage({ command: 'start' });
                 this.state = AudioState.RECORDING;
 
                 // Safety: Mute output during recording to prevent feedback loops
@@ -284,7 +357,7 @@ export class AudioEngine {
                 }
                 return true;
             } catch (e) {
-                console.error('Failed to start MediaRecorder:', e);
+                console.error('Failed to start PCM recording:', e);
                 return false;
             }
         }
@@ -295,11 +368,11 @@ export class AudioEngine {
         // ALWAYS reset state to IDLE to ensure UI doesn't get stuck
         this.state = AudioState.IDLE;
 
-        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+        if (this.recorderNode) {
             try {
-                this.mediaRecorder.stop();
+                this.recorderNode.port.postMessage({ command: 'stop' });
             } catch (e) {
-                console.error('Error stopping MediaRecorder:', e);
+                console.error('Error stopping PCM recording:', e);
             }
         }
 
@@ -334,9 +407,14 @@ export class AudioEngine {
 
         // -- Create Per-Source Gain for Enveloping/Fading --
         const sourceGain = this.context.createGain();
-        sourceGain.gain.value = 1.0;
         source.connect(sourceGain);
         this.activeSourceGain = sourceGain; // Store for fading
+
+        // Anti-click fades: short gain ramps at slice boundaries to prevent audible clicks
+        const fadeTime = 0.003; // 3ms — imperceptible but eliminates edge clicks
+        const now = this.context.currentTime;
+        sourceGain.gain.setValueAtTime(0, now);
+        sourceGain.gain.linearRampToValueAtTime(1, now + fadeTime);
 
         // Chain starts with sourceGain
         let currentNode = sourceGain;
@@ -388,6 +466,12 @@ export class AudioEngine {
         // When playbackRate != 1.0, we need to convert buffer-time to real-time
         // When looping, playDuration should be undefined to allow infinite looping
         const playDuration = loop ? undefined : bufferDuration / playbackRate;
+
+        // Anti-click fade-out at end of non-looping playback
+        if (!loop && playDuration && playDuration > fadeTime * 2) {
+            sourceGain.gain.setValueAtTime(1, now + playDuration - fadeTime);
+            sourceGain.gain.linearRampToValueAtTime(0, now + playDuration);
+        }
 
         source.loop = loop;
         source.loopStart = start;
@@ -709,477 +793,6 @@ export class AudioEngine {
         return newBuffer;
     }
 
-    /**
-     * Advanced transient detection using multiple methods (HFC, Phase Deviation, Energy) + BPM-weighted scoring
-     * Combines High Frequency Content, Phase Deviation, and Energy-based methods for 50% better accuracy
-     */
-    async detectTransients(buffer, thresholdPercent = 30, options = {}) {
-        const sampleRate = buffer.sampleRate;
-        const numChannels = buffer.numberOfChannels;
-        const length = buffer.length;
-
-        // Get mono mix if stereo
-        let audioData;
-        if (numChannels === 1) {
-            audioData = buffer.getChannelData(0);
-        } else {
-            audioData = new Float32Array(length);
-            const left = buffer.getChannelData(0);
-            const right = buffer.getChannelData(1);
-            for (let i = 0; i < length; i++) {
-                audioData[i] = (left[i] + right[i]) / 2;
-            }
-        }
-
-        // Improved algorithm: Multi-method approach for 50% better accuracy
-        const windowSize = Math.floor(sampleRate * 0.01); // 10ms windows
-        const hopSize = Math.floor(windowSize / 2); // 50% overlap for better resolution
-        const lookbackMs = options.lookbackMs || 10;
-        const lookbackSamples = Math.floor(sampleRate * lookbackMs / 1000);
-        const beatTolerance = options.beatTolerance || 0.05;
-
-        // Method 1: High Frequency Content (HFC) - excellent for percussive transients
-        const hfcValues = [];
-        const hfcSampleIndices = [];
-
-        // Method 2: Phase Deviation (PD) - detects phase changes (good for sharp attacks)
-        const phaseDevValues = [];
-
-        // Method 3: Energy-based (RMS)
-        const energyValues = [];
-
-        // Compute all three methods in a single pass
-        for (let i = 0; i < length - windowSize; i += hopSize) {
-            let energy = 0;
-            let hfc = 0;
-            let phaseDev = 0;
-            let prevPhase = null;
-
-            // Calculate window features
-            for (let j = 0; j < windowSize && i + j < length; j++) {
-                const sample = audioData[i + j];
-                energy += sample * sample;
-
-                // HFC: Weight by frequency (higher frequencies weighted more)
-                // Approximate with differentiation (high-pass filter)
-                if (j > 0) {
-                    const diff = sample - audioData[i + j - 1];
-                    hfc += diff * diff * (j + 1); // Weight increases with position (simulates frequency weighting)
-                }
-
-                // Phase Deviation: Detect phase changes (good for sharp attacks)
-                if (j > 1) {
-                    // Approximate phase using Hilbert transform approximation
-                    const currentPhase = Math.atan2(sample, audioData[Math.max(0, i + j - 1)]);
-                    if (prevPhase !== null) {
-                        let phaseDiff = currentPhase - prevPhase;
-                        // Handle phase wrapping
-                        if (phaseDiff > Math.PI) phaseDiff -= 2 * Math.PI;
-                        if (phaseDiff < -Math.PI) phaseDiff += 2 * Math.PI;
-                        phaseDev += Math.abs(phaseDiff);
-                    }
-                    prevPhase = currentPhase;
-                }
-            }
-
-            const rms = Math.sqrt(energy / windowSize);
-            const hfcNorm = Math.sqrt(hfc / (windowSize * windowSize)); // Normalize HFC
-            const pdNorm = phaseDev / Math.max(windowSize - 2, 1); // Normalize phase deviation
-
-            // Normalize each method to 0-1 range
-            hfcValues.push(hfcNorm);
-            phaseDevValues.push(pdNorm);
-            energyValues.push(rms);
-            hfcSampleIndices.push(i + Math.floor(windowSize / 2));
-        }
-
-        if (hfcValues.length === 0 || hfcValues.length !== phaseDevValues.length) {
-            return [0, length];
-        }
-
-        // Normalize each method independently
-        let maxHFC = Math.max(...hfcValues);
-        let maxPD = Math.max(...phaseDevValues);
-        let maxEnergy = Math.max(...energyValues);
-
-        if (maxHFC === 0) maxHFC = 1;
-        if (maxPD === 0) maxPD = 1;
-        if (maxEnergy === 0) maxEnergy = 1;
-
-        const normalizedHFC = hfcValues.map(v => v / maxHFC);
-        const normalizedPD = phaseDevValues.map(v => v / maxPD);
-        const normalizedEnergy = energyValues.map(v => v / maxEnergy);
-
-        // Step 2: Calculate derivatives (onset detection functions) for each method
-        const hfcOnset = [];
-        const pdOnset = [];
-        const energyOnset = [];
-
-        for (let i = 1; i < normalizedHFC.length; i++) {
-            // Only positive differences (energy increases)
-            hfcOnset.push(Math.max(0, normalizedHFC[i] - normalizedHFC[i - 1]));
-            pdOnset.push(Math.max(0, normalizedPD[i] - normalizedPD[i - 1]));
-            energyOnset.push(Math.max(0, normalizedEnergy[i] - normalizedEnergy[i - 1]));
-        }
-
-        if (hfcOnset.length === 0) {
-            return [0, length];
-        }
-
-        // Step 3: Combine methods with optimal weights (50% better accuracy)
-        // Research shows: HFC (40%) + Phase Deviation (35%) + Energy (25%) works best
-        const combinedOnset = hfcOnset.map((hfc, i) => {
-            return (hfc * 0.40) + (pdOnset[i] * 0.35) + (energyOnset[i] * 0.25);
-        });
-
-        // Normalize combined onset function
-        let maxOnset = Math.max(...combinedOnset);
-        if (maxOnset === 0) maxOnset = 1;
-        const normalizedOnset = combinedOnset.map(o => o / maxOnset);
-
-        // Apply smoothing (median filter)
-        const smoothedOnset = [];
-        for (let i = 0; i < normalizedOnset.length; i++) {
-            const window = [
-                i > 0 ? normalizedOnset[i - 1] : normalizedOnset[i],
-                normalizedOnset[i],
-                i < normalizedOnset.length - 1 ? normalizedOnset[i + 1] : normalizedOnset[i]
-            ];
-            window.sort((a, b) => a - b);
-            smoothedOnset.push(window[1]);
-        }
-
-        // Step 4: Calculate BPM-based scores if available
-        const detectedBPM = options.detectedBPM || null;
-        const bpmConfidence = options.bpmConfidence || 0;
-
-        let bpmWeight = options.bpmWeight;
-        if (bpmWeight === undefined) {
-            if (detectedBPM && bpmConfidence > 0.7) {
-                bpmWeight = 0.5;
-            } else if (detectedBPM && bpmConfidence > 0.4) {
-                bpmWeight = 0.3;
-            } else {
-                bpmWeight = 0.1;
-            }
-        }
-        const transientWeight = 1 - bpmWeight;
-
-        // Calculate beat-aligned scores
-        const beatScores = new Array(smoothedOnset.length).fill(0);
-        if (detectedBPM && bpmWeight > 0) {
-            const beatInterval = (60 / detectedBPM) * sampleRate;
-            const toleranceWindow = beatInterval * beatTolerance;
-            const beatGrid = [];
-
-            for (let beatPos = 0; beatPos < length; beatPos += beatInterval) {
-                beatGrid.push(Math.round(beatPos));
-            }
-
-            for (let i = 0; i < smoothedOnset.length; i++) {
-                const sampleIndex = hfcSampleIndices[i + 1]; // +1 because onset function is offset by 1
-                let bestScore = 0;
-
-                for (const beatPos of beatGrid) {
-                    const distance = Math.abs(sampleIndex - beatPos);
-                    if (distance < toleranceWindow) {
-                        const proximityScore = 1 - (distance / toleranceWindow);
-                        if (proximityScore > bestScore) {
-                            bestScore = proximityScore;
-                        }
-                    }
-                }
-
-                beatScores[i] = bestScore;
-            }
-        }
-
-        // Step 5: Combine scores
-        const combinedScores = smoothedOnset.map((onset, i) => {
-            return (onset * transientWeight) + (beatScores[i] * bpmWeight);
-        });
-
-        // Step 6: Percentile-based threshold
-        // Higher thresholdPercent = fewer chops (more selective, only top transients)
-        // Lower thresholdPercent = more chops (less selective, includes quieter transients)
-        // Scores are sorted descending (highest first)
-        const sortedScores = [...combinedScores].sort((a, b) => b - a);
-        // For descending array: lower index = higher score = higher threshold = fewer chops
-        // thresholdPercent 100 = index near 0 (top scores only, most selective)
-        // thresholdPercent 1 = index near end (includes lower scores, least selective = more chops)
-        // Invert: (1 - thresholdPercent/100) so lower thresholdPercent gives higher index = lower threshold = more chops
-        const percentileIndex = Math.floor(sortedScores.length * (1 - thresholdPercent / 100));
-        const threshold = sortedScores[Math.max(0, Math.min(percentileIndex, sortedScores.length - 1))] || 0;
-
-        // Step 7: Detect peaks above threshold with sustained energy filtering
-        // Calculate local energy averages aligned with analysis windows
-        const localEnergyWindow = Math.floor(sampleRate * 0.05); // 50ms window for local energy
-        const localEnergyAverages = [];
-
-        // Calculate local energy for each analysis window (aligned with hfcSampleIndices)
-        for (let i = 0; i < hfcSampleIndices.length; i++) {
-            const centerSample = hfcSampleIndices[i];
-            const windowStart = Math.max(0, centerSample - Math.floor(localEnergyWindow / 2));
-            const windowEnd = Math.min(length, centerSample + Math.floor(localEnergyWindow / 2));
-
-            let sum = 0;
-            let count = 0;
-            for (let j = windowStart; j < windowEnd; j++) {
-                sum += Math.abs(audioData[j]);
-                count++;
-            }
-            localEnergyAverages.push(count > 0 ? sum / count : 0);
-        }
-
-        // Calculate global energy statistics
-        const globalEnergyAvg = localEnergyAverages.reduce((a, b) => a + b, 0) / localEnergyAverages.length;
-        const sustainedEnergyThreshold = globalEnergyAvg * 1.5; // 50% above average = sustained
-
-        const candidateOnsets = [];
-        for (let i = 2; i < combinedScores.length - 2; i++) {
-            // Require local maximum with stronger neighbors check
-            if (combinedScores[i] > threshold &&
-                combinedScores[i] > combinedScores[i - 1] &&
-                combinedScores[i] > combinedScores[i + 1] &&
-                combinedScores[i] > combinedScores[i - 2] * 1.1 && // At least 10% higher than neighbors
-                combinedScores[i] > combinedScores[i + 2] * 1.1) {
-
-                const sampleIndex = hfcSampleIndices[i + 1];
-                const localEnergyIndex = i + 1; // Aligned with hfcSampleIndices
-                const localEnergy = localEnergyIndex < localEnergyAverages.length
-                    ? localEnergyAverages[localEnergyIndex]
-                    : globalEnergyAvg;
-
-                // Check if we're in a sustained high-energy region
-                const isSustainedHighEnergy = localEnergy > sustainedEnergyThreshold;
-
-                // Calculate attack strength: how much energy increased relative to recent average
-                const lookbackWindow = Math.min(10, i); // Look back up to 10 frames
-                let recentAvgEnergy = 0;
-                let recentCount = 0;
-                for (let j = Math.max(0, i - lookbackWindow); j < i; j++) {
-                    const idx = j + 1; // Aligned with hfcSampleIndices
-                    if (idx < localEnergyAverages.length) {
-                        recentAvgEnergy += localEnergyAverages[idx];
-                        recentCount++;
-                    }
-                }
-                recentAvgEnergy = recentCount > 0 ? recentAvgEnergy / recentCount : globalEnergyAvg;
-
-                // Calculate energy increase ratio
-                const energyIncreaseRatio = recentAvgEnergy > 0
-                    ? localEnergy / recentAvgEnergy
-                    : 1;
-
-                // For sustained high-energy regions, require stronger transient indicators
-                // Check HFC and Phase Deviation relative to energy (these indicate sharp attacks)
-                const hfcRatio = normalizedHFC[i] / Math.max(normalizedEnergy[i], 0.001);
-                const pdRatio = normalizedPD[i] / Math.max(normalizedEnergy[i], 0.001);
-                const transientStrength = (hfcRatio + pdRatio) / 2;
-
-                // Filter criteria:
-                // 1. If NOT in sustained high-energy: accept if above threshold
-                // 2. If IN sustained high-energy: only accept if:
-                //    - Significant energy increase (attack) OR
-                //    - Strong transient indicators (HFC/PD relative to energy) indicating beat/plosive
-                const hasSignificantAttack = energyIncreaseRatio > 1.3; // 30% increase
-                const hasStrongTransient = transientStrength > 0.6; // HFC/PD significantly higher than energy
-
-                if (!isSustainedHighEnergy || hasSignificantAttack || hasStrongTransient) {
-                    candidateOnsets.push({
-                        index: sampleIndex,
-                        score: combinedScores[i],
-                        energyIncreaseRatio,
-                        transientStrength
-                    });
-                }
-            }
-        }
-
-        // Step 8: Scan backward to find attack start (rising edge detection)
-        const chopPoints = [0];
-        for (const onset of candidateOnsets) {
-            let detectedPeak = onset.index;
-            const lookbackStart = Math.max(0, detectedPeak - lookbackSamples);
-
-            // Instead of finding minimum energy, find where energy starts rising significantly
-            // Look for the point where energy begins to increase before the detected peak
-            let attackStart = detectedPeak;
-            const peakEnergy = Math.abs(audioData[detectedPeak]);
-
-            // Calculate a threshold for "quiet" - use the minimum energy in the lookback window
-            let minEnergyInWindow = peakEnergy;
-            for (let i = detectedPeak; i >= lookbackStart && i >= 0; i--) {
-                const energy = Math.abs(audioData[i]);
-                if (energy < minEnergyInWindow) {
-                    minEnergyInWindow = energy;
-                }
-            }
-
-            // Define quiet threshold as slightly above minimum (to avoid noise floor)
-            const quietThreshold = minEnergyInWindow * 1.2;
-            const attackThreshold = minEnergyInWindow + (peakEnergy - minEnergyInWindow) * 0.15; // 15% of way to peak
-
-            // Scan backward to find where energy starts rising from quiet
-            let foundRisingEdge = false;
-            let lastEnergy = peakEnergy;
-
-            for (let i = detectedPeak; i >= lookbackStart && i >= 0; i--) {
-                const energy = Math.abs(audioData[i]);
-
-                // If we're still near peak, continue scanning
-                if (energy > peakEnergy * 0.7) {
-                    lastEnergy = energy;
-                    continue;
-                }
-
-                // Look for rising edge: energy was quiet, now increasing
-                if (!foundRisingEdge) {
-                    // Check if energy is rising (current > previous) and above attack threshold
-                    if (energy > lastEnergy && energy > attackThreshold) {
-                        // Found rising edge - this is likely the attack start
-                        attackStart = i;
-                        foundRisingEdge = true;
-                    }
-                } else {
-                    // Once we found rising edge, look for where it was quiet before
-                    if (energy < quietThreshold) {
-                        // Found the quiet point before attack - this is the ideal slice point
-                        attackStart = i;
-                        break;
-                    }
-                }
-
-                lastEnergy = energy;
-            }
-
-            // Fallback: if we didn't find a clear rising edge, use the point with minimum energy
-            // but only if it's significantly lower than the peak
-            if (!foundRisingEdge && minEnergyInWindow < peakEnergy * 0.5) {
-                for (let i = detectedPeak; i >= lookbackStart && i >= 0; i--) {
-                    const energy = Math.abs(audioData[i]);
-                    if (Math.abs(energy - minEnergyInWindow) < minEnergyInWindow * 0.1) {
-                        attackStart = i;
-                        break;
-                    }
-                }
-            }
-
-            chopPoints.push(attackStart);
-        }
-
-        // Step 9: Enforce minimum interval and sort
-        const minInterval = detectedBPM
-            ? Math.floor((60 / detectedBPM) / 4 * sampleRate)
-            : Math.floor(sampleRate * 0.08); // 80ms minimum for better spacing
-
-        chopPoints.sort((a, b) => a - b);
-        const filteredChopPoints = [0];
-        for (let i = 1; i < chopPoints.length; i++) {
-            const prevPoint = filteredChopPoints[filteredChopPoints.length - 1];
-            if (chopPoints[i] - prevPoint >= minInterval) {
-                filteredChopPoints.push(chopPoints[i]);
-            }
-        }
-
-        // Always include the end
-        if (filteredChopPoints[filteredChopPoints.length - 1] !== length) {
-            filteredChopPoints.push(length);
-        }
-
-        return filteredChopPoints;
-    }
-
-    /**
-     * Fallback RMS-based detection (simple energy-based)
-     */
-    detectTransientsFallback(buffer, thresholdPercent = 30) {
-        const sampleRate = buffer.sampleRate;
-        const windowSize = Math.floor(sampleRate * 0.01);
-        const chopPoints = [0];
-
-        const channelData = buffer.getChannelData(0);
-        const rmsValues = [];
-
-        for (let i = 0; i < channelData.length - windowSize; i += windowSize) {
-            let sum = 0;
-            for (let j = 0; j < windowSize && i + j < channelData.length; j++) {
-                sum += channelData[i + j] * channelData[i + j];
-            }
-            const rms = Math.sqrt(sum / windowSize);
-            rmsValues.push({ index: i, rms });
-        }
-
-        // Percentile-based threshold
-        const rmsOnly = rmsValues.map(v => v.rms);
-        const sorted = [...rmsOnly].sort((a, b) => b - a);
-        const percentileIndex = Math.floor(sorted.length * (1 - thresholdPercent / 100));
-        const threshold = sorted[percentileIndex] || 0;
-
-        for (let i = 1; i < rmsValues.length; i++) {
-            const prevRms = rmsValues[i - 1].rms;
-            const currRms = rmsValues[i].rms;
-            if (currRms > threshold && currRms > prevRms * 1.5) {
-                chopPoints.push(rmsValues[i].index);
-            }
-        }
-
-        if (chopPoints[chopPoints.length - 1] !== buffer.length) {
-            chopPoints.push(buffer.length);
-        }
-
-        return chopPoints;
-    }
-
-    createChops(buffer, chopPoints) {
-        const chops = [];
-        for (let i = 0; i < chopPoints.length - 1; i++) {
-            const startFrame = chopPoints[i];
-            const endFrame = chopPoints[i + 1];
-            const frameCount = endFrame - startFrame;
-
-            if (frameCount <= 0) continue;
-
-            const chopBuffer = this.context.createBuffer(
-                buffer.numberOfChannels,
-                frameCount,
-                buffer.sampleRate
-            );
-
-            for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-                const oldData = buffer.getChannelData(ch);
-                const newData = chopBuffer.getChannelData(ch);
-                for (let j = 0; j < frameCount; j++) {
-                    newData[j] = oldData[startFrame + j];
-                }
-            }
-
-            chops.push({
-                buffer: chopBuffer,
-                startFrame,
-                endFrame,
-                startTime: startFrame / buffer.sampleRate,
-                endTime: endFrame / buffer.sampleRate
-            });
-        }
-
-        return chops;
-    }
-
-    equalDivide(buffer, sliceCount) {
-        const frameCount = buffer.length;
-        const framesPerSlice = Math.floor(frameCount / sliceCount);
-        const chopPoints = [];
-
-        for (let i = 0; i <= sliceCount; i++) {
-            chopPoints.push(i * framesPerSlice);
-        }
-
-        chopPoints[chopPoints.length - 1] = frameCount;
-
-        return this.createChops(buffer, chopPoints);
-    }
-
     async applyEffectsAndResample(buffer, targetSampleRate = null) {
         const targetRate = targetSampleRate || buffer.sampleRate;
         const offlineContext = new OfflineAudioContext(
@@ -1462,7 +1075,7 @@ export class AudioEngine {
         while (sampleIndex < buffer.length) {
             for (i = 0; i < numOfChan; i++) {
                 sample = Math.max(-1, Math.min(1, channels[i][sampleIndex]));
-                sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
+                sample = (sample < 0 ? sample * 32768 : sample * 32767) | 0;
                 view.setInt16(44 + offset, sample, true);
                 offset += 2;
             }
@@ -1470,53 +1083,6 @@ export class AudioEngine {
         }
 
         return new Blob([bufferArr], { type: 'audio/wav' });
-    }
-
-    // --- Audio Analysis Methods ---
-
-    /**
-     * Detect BPM from audio buffer
-     * @param {AudioBuffer} buffer - Audio buffer to analyze
-     * @returns {Promise<{bpm: number, threshold: number} | null>}
-     */
-    async detectBPM(buffer) {
-        // Dynamic import to avoid loading in core engine
-        const { detectBPM } = await import('../utils/bpmDetector.js');
-        return await detectBPM(buffer);
-    }
-
-    /**
-     * Detect musical key from audio buffer
-     * @param {AudioBuffer} buffer - Audio buffer to analyze
-     * @returns {Promise<{key: string, mode: 'major'|'minor', confidence: number} | null>}
-     */
-    async detectKey(buffer) {
-        // Dynamic import to avoid loading in core engine
-        const { detectKey } = await import('../utils/keyDetector.js');
-        return await detectKey(buffer);
-    }
-
-    /**
-     * Analyze audio buffer for both key and BPM
-     * @param {AudioBuffer} buffer - Audio buffer to analyze
-     * @returns {Promise<{key: {key: string, mode: string, confidence: number} | null, bpm: {bpm: number, threshold: number} | null}>}
-     */
-    async analyzeAudio(buffer) {
-        const [keyResult, bpmResult] = await Promise.all([
-            this.detectKey(buffer).catch(err => {
-                console.error('Key detection error:', err);
-                return null;
-            }),
-            this.detectBPM(buffer).catch(err => {
-                console.error('BPM detection error:', err);
-                return null;
-            })
-        ]);
-
-        return {
-            key: keyResult,
-            bpm: bpmResult
-        };
     }
 
     // --- Time Stretching Methods ---
@@ -1537,42 +1103,4 @@ export class AudioEngine {
         });
     }
 
-    /**
-     * Time stretch with pitch shift
-     * @param {AudioBuffer} buffer - Audio buffer to process
-     * @param {number} stretchRatio - Time stretch ratio
-     * @param {number} pitchShiftSemitones - Pitch shift in semitones
-     * @returns {Promise<AudioBuffer>}
-     */
-    async timeStretchWithPitch(buffer, stretchRatio, pitchShiftSemitones) {
-        const { timeStretchWithPitch } = await import('../utils/timeStretcher.js');
-        return await timeStretchWithPitch(buffer, stretchRatio, pitchShiftSemitones);
-    }
-
-    // --- Noise Reduction Methods ---
-
-    /**
-     * Reduce noise in audio buffer
-     * @param {AudioBuffer} buffer - Audio buffer to process
-     * @param {object} options - Processing options
-     * @param {string} options.method - 'rnnoise' or 'spectral' (default: 'spectral')
-     * @param {number} options.aggressiveness - 0-1, higher = more aggressive (default: 0.5)
-     * @returns {Promise<AudioBuffer>}
-     */
-    async reduceNoise(buffer, options = {}) {
-        const { reduceNoise } = await import('../utils/noiseReduction.js');
-        return await reduceNoise(buffer, options);
-    }
-
-    /**
-     * Reduce noise with progress callback
-     * @param {AudioBuffer} buffer - Audio buffer to process
-     * @param {object} options - Processing options
-     * @param {Function} onProgress - Progress callback (0-1)
-     * @returns {Promise<AudioBuffer>}
-     */
-    async reduceNoiseWithProgress(buffer, options = {}, onProgress = null) {
-        const { reduceNoiseWithProgress } = await import('../utils/noiseReduction.js');
-        return await reduceNoiseWithProgress(buffer, options, onProgress);
-    }
 }
