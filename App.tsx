@@ -1896,20 +1896,20 @@ export default function App() {
 
             {/* Footer */}
             <div
-                className="shrink-0 flex items-center justify-between px-3 py-0.5"
+                className="shrink-0 flex items-center justify-between px-3 py-1"
                 style={{ background: 'var(--deep)', borderTop: '1px solid var(--border-subtle)' }}
             >
-                <span className="text-[7px]" style={{ color: 'var(--text-faint)' }}>
+                <span className="text-[8px]" style={{ color: 'var(--text-faint)' }}>
                     All processing happens locally. MP3 by <a href="https://lame.sourceforge.net" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>LAME</a> (LGPL-3.0)
                 </span>
                 <a
                     href="https://ko-fi.com/W7W51UG11V"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[7px] font-medium hover:opacity-80 transition-opacity"
-                    style={{ color: 'var(--text-muted)' }}
+                    className="text-[9px] font-semibold hover:opacity-80 transition-opacity px-2 py-0.5 rounded"
+                    style={{ color: '#FACC15', background: 'rgba(250,204,21,0.1)' }}
                 >
-                    Support on Ko-fi
+                    ☕ Support on Ko-fi
                 </a>
             </div>
 

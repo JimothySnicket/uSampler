@@ -240,15 +240,15 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
                     </Button>
                 </div>
 
-                <div className="text-center mt-2">
+                <div className="text-center mt-3">
                     <a
                         href="https://ko-fi.com/W7W51UG11V"
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-[7px] hover:opacity-80 transition-opacity"
-                        style={{ color: 'var(--text-faint)' }}
+                        className="text-[9px] font-semibold hover:opacity-80 transition-opacity px-3 py-1 rounded inline-block"
+                        style={{ color: '#FACC15', background: 'rgba(250,204,21,0.1)' }}
                     >
-                        Enjoying uSampler? Support on Ko-fi
+                        ☕ Enjoying uSampler? Support on Ko-fi
                     </a>
                 </div>
             </div>
