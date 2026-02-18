@@ -23,7 +23,6 @@
 - [x] `tabCapture` — audio capture from tabs
 - [x] `activeTab` — interact with current tab
 - [x] `tabs` — tab management for capture
-- [x] `scripting` — Manifest V3 requirement
 - [x] `windows` — popup window creation
 - [x] `downloads` — export audio files
 - [x] `storage` — session/settings persistence

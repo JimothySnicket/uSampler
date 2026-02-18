@@ -31,7 +31,6 @@ uSampler requires the following permissions:
 - **tabCapture:** Required to capture audio from browser tabs
 - **activeTab:** Required to interact with the current browser tab
 - **tabs:** Required for tab management during audio capture
-- **scripting:** Required for Manifest V3 extension functionality
 - **windows:** Required to open the extension popup window
 - **downloads:** Required to save exported audio files to your device
 - **storage:** Required to save your settings and session data locally
