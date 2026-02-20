@@ -7,7 +7,6 @@
     "permissions": [
         "tabCapture",
         "activeTab",
-        "tabs",
         "windows",
         "downloads",
         "storage"
