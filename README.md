@@ -19,7 +19,7 @@ This replaces $70+ audio capture software. All processing happens locally -- you
 ## Install
 
 ### From Chrome Web Store
-*(Coming soon)*
+[Install from Chrome Web Store](https://chromewebstore.google.com/detail/usampler/aloekkflidfdkcojjankhggdldjlbfem)
 
 ### From Source
 ```bash
@@ -58,8 +58,6 @@ See [CLAUDE.md](./CLAUDE.md) for detailed architecture documentation.
 |-----------|-----|
 | `tabCapture` | Capture audio from browser tabs |
 | `activeTab` | Interact with the current tab |
-| `tabs` | Tab management for capture |
-| `scripting` | Manifest V3 requirement |
 | `windows` | Open popup window |
 | `downloads` | Save exported audio files |
 | `storage` | Persist sessions and settings |
