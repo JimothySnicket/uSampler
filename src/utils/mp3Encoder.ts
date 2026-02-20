@@ -3,6 +3,8 @@
  * Converts AudioBuffer to MP3 format
  */
 
+import { debug, debugError, debugWarn } from './logger';
+
 // Chrome API type declaration
 declare const chrome: {
     runtime?: {
@@ -23,7 +25,7 @@ async function loadLamejs(): Promise<any> {
         try {
             // Check if already loaded on window
             if (typeof window !== 'undefined' && (window as any).lamejs && (window as any).lamejs.Mp3Encoder) {
-                console.log('[mp3Encoder] lamejs already loaded on window');
+                debug('[mp3Encoder] lamejs already loaded on window');
                 return (window as any).lamejs;
             }
             
@@ -35,7 +37,7 @@ async function loadLamejs(): Promise<any> {
                 if (existingScript) {
                     // Script already loaded, check if lamejs is available
                     if (typeof (window as any).lamejs !== 'undefined' && (window as any).lamejs.Mp3Encoder) {
-                        console.log('[mp3Encoder] lamejs already loaded from existing script');
+                        debug('[mp3Encoder] lamejs already loaded from existing script');
                         resolve((window as any).lamejs);
                         return;
                     }
@@ -54,24 +56,24 @@ async function loadLamejs(): Promise<any> {
                     // Wait a moment for the script to execute (lame.all.js calls lamejs() at the end)
                     setTimeout(() => {
                         if (typeof (window as any).lamejs !== 'undefined' && (window as any).lamejs.Mp3Encoder) {
-                            console.log('[mp3Encoder] lamejs loaded successfully from script tag');
+                            debug('[mp3Encoder] lamejs loaded successfully from script tag');
                             resolve((window as any).lamejs);
                         } else {
-                            console.error('[mp3Encoder] lamejs not found on window after script load');
-                            console.error('[mp3Encoder] window.lamejs:', (window as any).lamejs);
+                            debugError('[mp3Encoder] lamejs not found on window after script load');
+                            debugError('[mp3Encoder] window.lamejs:', (window as any).lamejs);
                             reject(new Error('lamejs not found on window after script load. Check console for details.'));
                         }
                     }, 200);
                 };
                 script.onerror = (error) => {
-                    console.error('[mp3Encoder] Failed to load lame.all.js script:', error);
-                    console.error('[mp3Encoder] Script path attempted:', scriptPath);
+                    debugError('[mp3Encoder] Failed to load lame.all.js script:', error);
+                    debugError('[mp3Encoder] Script path attempted:', scriptPath);
                     reject(new Error(`Failed to load lame.all.js script from ${scriptPath}`));
                 };
                 document.head.appendChild(script);
             });
         } catch (error) {
-            console.error('[mp3Encoder] Failed to load lamejs:', error);
+            debugError('[mp3Encoder] Failed to load lamejs:', error);
             throw error;
         }
     })();
@@ -101,18 +103,18 @@ export async function audioBufferToMp3(
 ): Promise<Blob> {
     try {
         // Load lamejs dynamically
-        console.log('[mp3Encoder] Loading lamejs...');
+        debug('[mp3Encoder] Loading lamejs...');
         const lamejs = await loadLamejs();
         
         // Check if lamejs is available with detailed logging
-        console.log('[mp3Encoder] Checking lamejs availability...');
-        console.log('[mp3Encoder] typeof lamejs:', typeof lamejs);
-        console.log('[mp3Encoder] lamejs object:', lamejs);
-        console.log('[mp3Encoder] lamejs keys:', lamejs ? Object.keys(lamejs) : 'lamejs is null/undefined');
-        console.log('[mp3Encoder] lamejs.Mp3Encoder:', (lamejs as any)?.Mp3Encoder);
+        debug('[mp3Encoder] Checking lamejs availability...');
+        debug('[mp3Encoder] typeof lamejs:', typeof lamejs);
+        debug('[mp3Encoder] lamejs object:', lamejs);
+        debug('[mp3Encoder] lamejs keys:', lamejs ? Object.keys(lamejs) : 'lamejs is null/undefined');
+        debug('[mp3Encoder] lamejs.Mp3Encoder:', (lamejs as any)?.Mp3Encoder);
         
         if (typeof lamejs === 'undefined' || lamejs === null) {
-            console.error('[mp3Encoder] lamejs is undefined/null - module not loaded');
+            debugError('[mp3Encoder] lamejs is undefined/null - module not loaded');
             throw new Error('lamejs library is not loaded. MP3 encoding is not available. Please ensure lamejs is properly installed.');
         }
         
@@ -120,13 +122,13 @@ export async function audioBufferToMp3(
         const Mp3Encoder = (lamejs as any).Mp3Encoder;
         
         if (!Mp3Encoder || typeof Mp3Encoder !== 'function') {
-            console.error('[mp3Encoder] Mp3Encoder not found or not a function');
-            console.error('[mp3Encoder] Available properties:', Object.keys(lamejs));
-            console.error('[mp3Encoder] typeof Mp3Encoder:', typeof Mp3Encoder);
+            debugError('[mp3Encoder] Mp3Encoder not found or not a function');
+            debugError('[mp3Encoder] Available properties:', Object.keys(lamejs));
+            debugError('[mp3Encoder] typeof Mp3Encoder:', typeof Mp3Encoder);
             throw new Error('lamejs.Mp3Encoder is not available or not a function. The library may not be properly initialized.');
         }
         
-        console.log('[mp3Encoder] Mp3Encoder found, ready to encode');
+        debug('[mp3Encoder] Mp3Encoder found, ready to encode');
 
         // Validate bitrate
         const validBitrates = [128, 192, 256, 320];
@@ -187,9 +189,9 @@ export async function audioBufferToMp3(
             // Get Mp3Encoder constructor
             const Mp3Encoder = (lamejs as any).Mp3Encoder;
             
-            console.log(`[mp3Encoder] Creating encoder: ${numChannels}ch, ${sampleRate}Hz, ${bitrate}kbps`);
-            console.log('[mp3Encoder] Mp3Encoder constructor:', typeof Mp3Encoder);
-            console.log('[mp3Encoder] Mp3Encoder name:', Mp3Encoder?.name);
+            debug(`[mp3Encoder] Creating encoder: ${numChannels}ch, ${sampleRate}Hz, ${bitrate}kbps`);
+            debug('[mp3Encoder] Mp3Encoder constructor:', typeof Mp3Encoder);
+            debug('[mp3Encoder] Mp3Encoder name:', Mp3Encoder?.name);
             
             if (typeof Mp3Encoder !== 'function') {
                 throw new Error(`Mp3Encoder is not a function, got: ${typeof Mp3Encoder}`);
@@ -199,10 +201,10 @@ export async function audioBufferToMp3(
             if (!mp3encoder) {
                 throw new Error('Failed to create MP3 encoder instance - constructor returned null/undefined');
             }
-            console.log('[mp3Encoder] Encoder created successfully:', mp3encoder);
+            debug('[mp3Encoder] Encoder created successfully:', mp3encoder);
         } catch (err) {
-            console.error('[mp3Encoder] Failed to create encoder:', err);
-            console.error('[mp3Encoder] Error stack:', err instanceof Error ? err.stack : 'No stack');
+            debugError('[mp3Encoder] Failed to create encoder:', err);
+            debugError('[mp3Encoder] Error stack:', err instanceof Error ? err.stack : 'No stack');
             const errorMsg = err instanceof Error ? err.message : String(err);
             throw new Error(`Failed to initialize MP3 encoder: ${errorMsg}. Check console for details.`);
         }
@@ -221,7 +223,7 @@ export async function audioBufferToMp3(
                     mp3Data.push(mp3buf);
                 }
             } catch (err) {
-                console.warn(`[mp3Encoder] Error encoding block at sample ${i}:`, err);
+                debugWarn(`[mp3Encoder] Error encoding block at sample ${i}:`, err);
                 // Continue encoding other blocks
             }
         }
@@ -234,7 +236,7 @@ export async function audioBufferToMp3(
                 mp3Data.push(finalBuf);
             }
         } catch (err) {
-            console.warn('[mp3Encoder] Error flushing encoder:', err);
+            debugWarn('[mp3Encoder] Error flushing encoder:', err);
             // Continue even if flush fails
         }
 
@@ -263,10 +265,10 @@ export async function audioBufferToMp3(
             throw new Error('Failed to create MP3 blob: blob is empty');
         }
 
-        console.log(`[mp3Encoder] Successfully encoded MP3: ${(blob.size / 1024).toFixed(2)} KB, ${numChannels}ch, ${sampleRate}Hz, ${bitrate}kbps`);
+        debug(`[mp3Encoder] Successfully encoded MP3: ${(blob.size / 1024).toFixed(2)} KB, ${numChannels}ch, ${sampleRate}Hz, ${bitrate}kbps`);
         return blob;
     } catch (error) {
-        console.error('[mp3Encoder] MP3 encoding error:', error);
+        debugError('[mp3Encoder] MP3 encoding error:', error);
         if (error instanceof Error) {
             throw new Error(`MP3 encoding failed: ${error.message}`);
         }
